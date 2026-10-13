@@ -144,17 +144,20 @@ final class ServiceTests: XCTestCase {
         let later = await service.refresh(.claude, trigger: .scheduled)
         XCTAssertEqual(later.problem, .expired)
         XCTAssertEqual(later.backoffLevel, 2)
-        XCTAssertEqual(claude.readCount, 1, "the item has not changed, so its secret is not read again")
+        XCTAssertEqual(claude.readCount, 2, "the expired token's one fresh read, which found it unchanged")
         XCTAssertEqual(UsageStatus.of(later, enabled: true, now: clock.get(), staleAfter: 660), .signedOut)
+        advance(600)
+        await service.refresh(.claude, trigger: .scheduled)
+        XCTAssertEqual(claude.readCount, 2, "the item has not changed and the fresh read is spent: nothing is read")
 
         // Claude Code refreshed its sign-in: the item changed, so it is read again.
         claude.keychain(changedAt: clock.get())
         claude.secret(.found(token()))
         transport.answer("api.anthropic.com", ok(Fixtures.claudeUsage))
-        advance(300)
+        advance(1000)   // past the 16-minute backoff
         let fresh = await service.refresh(.claude, trigger: .scheduled)
         XCTAssertNil(fresh.problem)
-        XCTAssertEqual(claude.readCount, 2)
+        XCTAssertEqual(claude.readCount, 3)
     }
 
     func testAPanelOpeningLooksAgainAtALocalProblemButWaitsOutARemoteOne() async {
@@ -176,9 +179,10 @@ final class ServiceTests: XCTestCase {
         XCTAssertEqual(transport.requests.get().count, 1, "rate-limited: the panel waits out the backoff")
     }
 
-    func testA401RereadsOnlyWhenTheItemChanged() async {
+    func testA401RereadsTheChangedItemAndRetriesOnce() async {
         claude.keychain(changedAt: Fixtures.now)
-        claude.secret(.found(token("OLD-claude-token")), .found(token()))
+        // The store holds the old token until Claude Code writes the new one.
+        claude.secret(.found(token("OLD-claude-token")), .found(token("OLD-claude-token")), .found(token()))
         transport.answer("api.anthropic.com", ok(Fixtures.claudeUsage), TransportResponse(status: 401), TransportResponse(status: 401),
                          ok(Fixtures.claudeUsage))
         let service = service()
@@ -186,7 +190,7 @@ final class ServiceTests: XCTestCase {
         advance(300)
         let refused = await service.refresh(.claude, trigger: .scheduled)
         XCTAssertEqual(refused.problem, .unauthorized)
-        XCTAssertEqual(claude.readCount, 1, "an unchanged item is not read again after a 401")
+        XCTAssertEqual(claude.readCount, 2, "one fresh read after the 401, which found the same token, so no retry")
         XCTAssertNotNil(refused.reading)
         XCTAssertEqual(refused.problem?.hint(for: .claude), "Open Claude Code to refresh your sign-in")
 
@@ -195,9 +199,53 @@ final class ServiceTests: XCTestCase {
         claude.keychain(changedAt: Fixtures.now, clock.get())
         let record = await service.refresh(.claude, trigger: .scheduled)
         XCTAssertNil(record.problem)
-        XCTAssertEqual(claude.readCount, 2)
+        XCTAssertEqual(claude.readCount, 3)
         XCTAssertEqual(transport.requests.get().map { $0.value(forHTTPHeaderField: "Authorization") ?? "" },
                        ["Bearer OLD-claude-token", "Bearer OLD-claude-token", "Bearer OLD-claude-token", "Bearer \(Fixtures.claudeAccess)"])
+    }
+
+    /// The item's modification date has one-second resolution: two rewrites inside a second
+    /// around a read leave the stamp unchanged while the secret moved on. So a held token that
+    /// expires, or is refused, earns one fresh read even with the stamp unchanged.
+    func testAnExpiredTokenEarnsOneFreshReadEvenWithTheStampUnchanged() async {
+        claude.keychain(changedAt: Fixtures.now)
+        claude.secret(.found(token("OLD-claude-token", expiresIn: 600)), .found(token()))
+        transport.answer("api.anthropic.com", ok(Fixtures.claudeUsage))
+        let service = service()
+        await service.refresh(.claude, trigger: .scheduled)
+        advance(700)   // the held token has expired; the stamp has not moved
+        let record = await service.refresh(.claude, trigger: .scheduled)
+        XCTAssertNil(record.problem, "the fresh read found the newer token")
+        XCTAssertEqual(claude.readCount, 2)
+        XCTAssertEqual(transport.requests.get().last?.value(forHTTPHeaderField: "Authorization"), "Bearer \(Fixtures.claudeAccess)")
+    }
+
+    func testTheFreshReadIsSpentOncePerHeldToken() async {
+        claude.keychain(changedAt: Fixtures.now)
+        claude.secret(.found(token("OLD-claude-token", expiresIn: 600)))   // the store really has only the old one
+        transport.answer("api.anthropic.com", ok(Fixtures.claudeUsage))
+        let service = service()
+        await service.refresh(.claude, trigger: .scheduled)
+        for _ in 0..<4 {
+            advance(1900)
+            let record = await service.refresh(.claude, trigger: .scheduled)
+            XCTAssertEqual(record.problem, .expired)
+        }
+        XCTAssertEqual(claude.readCount, 2, "one fresh read for the expired token, then nothing until the item changes")
+    }
+
+    func testA401EarnsOneFreshReadEvenWithTheStampUnchanged() async {
+        claude.keychain(changedAt: Fixtures.now)
+        claude.secret(.found(token("OLD-claude-token")), .found(token()))
+        transport.answer("api.anthropic.com", ok(Fixtures.claudeUsage), TransportResponse(status: 401), ok(Fixtures.claudeUsage))
+        let service = service()
+        await service.refresh(.claude, trigger: .scheduled)
+        advance(300)
+        let record = await service.refresh(.claude, trigger: .scheduled)
+        XCTAssertNil(record.problem, "retried once with the newer token the fresh read found")
+        XCTAssertEqual(claude.readCount, 2)
+        XCTAssertEqual(transport.requests.get().map { $0.value(forHTTPHeaderField: "Authorization") ?? "" },
+                       ["Bearer OLD-claude-token", "Bearer OLD-claude-token", "Bearer \(Fixtures.claudeAccess)"])
     }
 
     func testA403IsTheProvidersErrorAndNeverTouchesTheItem() async {

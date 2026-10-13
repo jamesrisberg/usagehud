@@ -144,9 +144,11 @@ public enum RefreshTrigger: String, Sendable {
 /// refresh here would sign the owner out of Claude Code or Codex); an expired token is
 /// reported as such and the last good reading is shown as stale.
 ///
-/// Claude's secret is read only when it is needed: when no token is held, or when the store's
-/// stamp (its modification date) changed since the token was read. An expired token in an
-/// unchanged store costs a metadata read and nothing else. After the Keychain refused
+/// Claude's secret is read only when it is needed: when no token is held, when the store's
+/// stamp (its modification date) changed since the token was read, or once per held token
+/// after it expires or is refused (the date has one-second resolution, so two rewrites inside a
+/// second can leave it unchanged while the secret moved on). Past that one read, an expired
+/// token in an unchanged store costs a metadata read and nothing else. After the Keychain refused
 /// `security`, the item is not read again until it changes or the owner refreshes.
 public actor UsageService {
     public typealias Clock = @Sendable () -> Date
@@ -161,8 +163,9 @@ public actor UsageService {
     private var records: [Provider: ProviderRecord]
     /// The Keychain item as it was when `security` was refused it.
     public private(set) var claudeBlocked: CredentialStamp?
-    /// Claude's token, held in memory only (never on disk), with the stamp of the store it came from.
-    private var claude: (token: ClaudeToken, stamp: CredentialStamp)?
+    /// Claude's token, held in memory only (never on disk), with the stamp of the store it came
+    /// from and whether its one fresh read on an unchanged stamp has been spent.
+    private var claude: (token: ClaudeToken, stamp: CredentialStamp, freshReadSpent: Bool)?
     private var inFlight: Set<Provider> = []
 
     public init(transport: UsageTransport, claudeSource: ClaudeTokenSource, codexSource: CodexTokenSource,
@@ -218,11 +221,11 @@ public actor UsageService {
 
         let response = await transport.send(ClaudeUsage.request(token: held.token))
         if response.status == 401 {
-            // Refused. Claude Code may have replaced the token since it was read: if the store
-            // changed, read it once more and retry once with the new token. Otherwise there is
-            // nothing new to read.
-            if case .present(let now) = await claudeSource.stamp(), now != held.stamp,
-               await holdClaudeToken(stamp: now, trigger: trigger) == nil,
+            // Refused. Claude Code may have replaced the token since it was read: read the store
+            // again (if it changed, or as this token's one fresh read) and retry once with a
+            // different token.
+            if case .present(let now) = await claudeSource.stamp(),
+               await holdClaudeToken(stamp: now, trigger: trigger, refused: true) == nil,
                let fresh = claude, fresh.token != held.token, !fresh.token.isExpired(at: clock()) {
                 let retry = await transport.send(ClaudeUsage.request(token: fresh.token))
                 return outcome(of: retry, current: current, backOff: true) {
@@ -236,19 +239,26 @@ public actor UsageService {
     }
 
     /// Makes sure `claude` holds the token of the store as `stamp` describes it, reading the
-    /// secret only when needed. Returns why it could not.
-    private func holdClaudeToken(stamp: CredentialStamp, trigger: RefreshTrigger) async -> FetchProblem? {
+    /// secret only when needed. `refused`: the held token just got a 401. Returns why it could not.
+    private func holdClaudeToken(stamp: CredentialStamp, trigger: RefreshTrigger, refused: Bool = false) async -> FetchProblem? {
+        var freshRead = false
         if let held = claude, held.stamp == stamp {
-            // Unchanged store. A store that keeps no modification date is read again once the
-            // held token has expired, since nothing else would tell that it changed.
-            guard stamp.modified == nil, held.token.isExpired(at: clock()) else { return nil }
+            // Unchanged store: keep a token that still works. One that expired or was refused
+            // earns one fresh read; a store that keeps no modification date is read whenever its
+            // token has gone, since nothing else would tell that it changed.
+            guard refused || held.token.isExpired(at: clock()) else { return nil }
+            if stamp.modified != nil {
+                guard !held.freshReadSpent else { return nil }
+                freshRead = true
+            }
         }
         if stamp.location == .keychain, let blocked = claudeBlocked, blocked == stamp, trigger != .user {
             return .keychainNeedsApproval
         }
         switch await claudeSource.read(stamp.location, patient: trigger == .user) {
         case .found(let token):
-            claude = (token, stamp)
+            // A fresh read that found the same token has spent it; a new token earns its own.
+            claude = (token, stamp, freshRead && claude?.token == token)
             if stamp.location == .keychain { claudeBlocked = nil }
             return nil
         case .missing:
