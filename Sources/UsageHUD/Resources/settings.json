@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "settings": [
+    {
+      "key": "greeting",
+      "title": "Greeting",
+      "type": "string",
+      "default": "Hello from UsageHUD",
+      "help": "What the panel says until `usagehud say` changes it."
+    },
+    {
+      "key": "showCount",
+      "title": "Show how many times the panel was opened",
+      "type": "bool",
+      "default": true
+    }
+  ]
+}

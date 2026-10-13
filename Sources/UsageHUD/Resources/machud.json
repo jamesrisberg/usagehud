@@ -1,0 +1,18 @@
+{
+  "id": "xyz.machud.usagehud",
+  "name": "UsageHUD",
+  "socket": "usagehud",
+  "iconName": "sparkles",
+  "panels": [
+    {
+      "id": "main",
+      "title": "UsageHUD",
+      "symbol": "sparkles",
+      "kind": "hover",
+      "order": 90,
+      "defaultSize": [320, 160],
+      "verbs": ["show", "hide", "toggle", "frame", "say"],
+      "settingsSchema": "settings.json"
+    }
+  ]
+}
