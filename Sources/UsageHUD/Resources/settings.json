@@ -2,17 +2,28 @@
   "version": 1,
   "settings": [
     {
-      "key": "greeting",
-      "title": "Greeting",
-      "type": "string",
-      "default": "Hello from UsageHUD",
-      "help": "What the panel says until `usagehud say` changes it."
+      "key": "pollMinutes",
+      "title": "Check every (minutes)",
+      "type": "int",
+      "min": 1,
+      "max": 60,
+      "step": 1,
+      "default": 5,
+      "help": "How often UsageHUD reads both subscriptions. Opening the panel also reads one that is over a minute old."
     },
     {
-      "key": "showCount",
-      "title": "Show how many times the panel was opened",
+      "key": "claudeEnabled",
+      "title": "Show Claude",
       "type": "bool",
-      "default": true
+      "default": true,
+      "help": "Reads Claude Code's sign-in from the Keychain (asks once: choose Always Allow)."
+    },
+    {
+      "key": "codexEnabled",
+      "title": "Show Codex",
+      "type": "bool",
+      "default": true,
+      "help": "Reads Codex's sign-in from ~/.codex/auth.json, and its session logs when offline."
     }
   ]
 }

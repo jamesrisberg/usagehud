@@ -4,28 +4,40 @@ import Foundation
 /// `<home>/preferences.json`. Values arrive over the socket as strings (`settings set k=v`),
 /// so `applying(_:)` parses and validates them all before changing anything.
 public struct AppSettings: Codable, Equatable, Sendable {
-    public var greeting: String
-    public var showCount: Bool
+    /// Minutes between reads (1-60).
+    public var pollMinutes: Int
+    public var claudeEnabled: Bool
+    public var codexEnabled: Bool
 
-    public init(greeting: String = AppSettings.defaultGreeting, showCount: Bool = true) {
-        self.greeting = greeting
-        self.showCount = showCount
+    public init(pollMinutes: Int = 5, claudeEnabled: Bool = true, codexEnabled: Bool = true) {
+        self.pollMinutes = pollMinutes
+        self.claudeEnabled = claudeEnabled
+        self.codexEnabled = codexEnabled
     }
 
-    public static let defaultGreeting = "Hello from UsageHUD"
+    public static let pollRange = 1...60
     /// The keys `settings get` reports and `settings set` accepts (Resources/settings.json).
-    public static let keys: Set<String> = ["greeting", "showCount"]
+    public static let keys: Set<String> = ["pollMinutes", "claudeEnabled", "codexEnabled"]
+
+    public func isEnabled(_ provider: Provider) -> Bool {
+        switch provider {
+        case .claude: return claudeEnabled
+        case .codex: return codexEnabled
+        }
+    }
+
+    public var enabledProviders: [Provider] { Provider.allCases.filter(isEnabled) }
 
     /// Saved values are merged over the defaults key by key: a key missing from
     /// `preferences.json` (written before the setting existed) or one that does not decode
-    /// keeps its default, and every other saved value is kept. With the synthesized decoder one
-    /// new field made the whole file fail to decode and every saved setting reset.
-    /// Add each new field here with `Self.value(_:_:default:)`.
+    /// keeps its default, and every other saved value is kept.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = AppSettings()
-        greeting = Self.value(c, .greeting, default: d.greeting)
-        showCount = Self.value(c, .showCount, default: d.showCount)
+        pollMinutes = Self.value(c, .pollMinutes, default: d.pollMinutes)
+        claudeEnabled = Self.value(c, .claudeEnabled, default: d.claudeEnabled)
+        codexEnabled = Self.value(c, .codexEnabled, default: d.codexEnabled)
+        if !Self.pollRange.contains(pollMinutes) { pollMinutes = d.pollMinutes }
     }
 
     private static func value<T: Decodable, K: CodingKey>(_ c: KeyedDecodingContainer<K>, _ key: K, default fallback: T) -> T {
@@ -49,13 +61,14 @@ public struct AppSettings: Codable, Equatable, Sendable {
         var next = self
         for (key, value) in values.sorted(by: { $0.key < $1.key }) {
             switch key {
-            case "greeting":
-                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !trimmed.isEmpty else { throw SettingsError.invalid(key: key, value: value) }
-                next.greeting = trimmed
-            case "showCount":
+            case "pollMinutes":
+                guard let minutes = Int(value.trimmingCharacters(in: .whitespaces)), Self.pollRange.contains(minutes) else {
+                    throw SettingsError.invalid(key: key, value: value)
+                }
+                next.pollMinutes = minutes
+            case "claudeEnabled", "codexEnabled":
                 guard let flag = Self.bool(value) else { throw SettingsError.invalid(key: key, value: value) }
-                next.showCount = flag
+                if key == "claudeEnabled" { next.claudeEnabled = flag } else { next.codexEnabled = flag }
             default:
                 throw SettingsError.unknownKey(key)
             }
@@ -64,7 +77,7 @@ public struct AppSettings: Codable, Equatable, Sendable {
     }
 
     /// `settings get`'s payload.
-    public var json: [String: Any] { ["greeting": greeting, "showCount": showCount] }
+    public var json: [String: Any] { ["pollMinutes": pollMinutes, "claudeEnabled": claudeEnabled, "codexEnabled": codexEnabled] }
 
     static func bool(_ value: String) -> Bool? {
         switch value.lowercased() {

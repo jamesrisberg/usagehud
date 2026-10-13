@@ -8,21 +8,26 @@ import UsageHUDKit
 @MainActor
 final class ControlHost: HUDPanelHost {
     nonisolated static let panelID = "main"
-    static let actions = ["say", "show", "hide", "toggle"]
+    /// The desktop widget type: a `kind: widget` manifest panel, served by `HUDWidgetHost` (UsageWidget.swift).
+    nonisolated static let widgetType = "usage"
+    static let actions = ["refresh", "usage", "show", "hide", "toggle"]
+    static let verbs = ["show", "hide", "toggle", "frame", "refresh", "usage"]
 
     /// Used when running outside a bundle (`swift run`, tests); mirrors Resources/machud.json.
     static let builtinManifest = HUDManifest(id: "xyz.machud.usagehud", name: "UsageHUD", socket: "usagehud", panels: [
-        HUDManifest.Panel(id: panelID, title: "UsageHUD", symbol: "sparkles",
+        HUDManifest.Panel(id: panelID, title: "Usage", symbol: "gauge.with.dots.needle.50percent",
                           defaultSize: HUDSize(PanelController.size),
-                          verbs: ["show", "hide", "toggle", "frame", "say"],
-                          settingsSchema: "settings.json", kind: .hover, order: 90),
-    ], iconName: "sparkles")
+                          verbs: verbs, settingsSchema: "settings.json", kind: .hover, order: 6),
+        HUDManifest.Panel(id: widgetType, title: "Usage", symbol: "gauge.with.dots.needle.50percent", kind: .widget,
+                          widget: HUDWidgetSpec(sizes: [.small, .medium], defaultSize: .small, multiple: true, refresh: 60)),
+    ], iconName: "gauge.with.dots.needle.50percent")
 
     let manifest: HUDManifest
     let server: HUDSocketServer
     private(set) var router: HUDControlRouter!
     let model: AppModel
     let panel: PanelController
+    private var lastPublished: String?
 
     init(model: AppModel, panel: PanelController, socketPath: String? = nil) {
         self.model = model
@@ -36,17 +41,25 @@ final class ControlHost: HUDPanelHost {
     func start() {
         router.install()
         if !server.start() { NSLog("UsageHUD: control socket failed to start at %@", server.path) }
-        panel.onStateChange = { [weak self] in self?.router.publishState() }
     }
 
     func stop() { server.stop() }
+
+    /// Pushes `state` when anything MacHUD shows changed (visibility, the badge, the status line).
+    func publishIfChanged() {
+        let signature = panelStates.map { "\($0.visible)|\($0.badge ?? "")|\($0.status ?? "")" }.joined()
+        guard signature != lastPublished else { return }
+        lastPublished = signature
+        router.publishState()
+    }
 
     // MARK: - HUDPanelHost
 
     var panelDescriptors: [HUDManifest.Panel] { manifest.panels }
 
+    /// `badge` is the fullest meter (`42%`); `status` one line per provider.
     var panelStates: [HUDPanelState] {
-        [HUDPanelState(id: Self.panelID, visible: panel.isShown, status: model.text)]
+        [HUDPanelState(id: Self.panelID, visible: panel.isShown, badge: model.badge, status: model.statusLine)]
     }
 
     private func check(_ id: String) throws {
@@ -82,18 +95,38 @@ final class ControlHost: HUDPanelHost {
         } catch let error as AppSettings.SettingsError {
             throw HUDControlError.invalid(error.description)
         }
-        router.publishState()
+        publishIfChanged()
     }
 
     // MARK: Actions
 
+    /// Runs on the main thread and answers at once: `refresh` replies when the reads have
+    /// started and publishes `state` when each lands.
     func performAction(_ name: String, args: [String: String], done: @escaping ([String: Any]) -> Void) {
         switch name {
-        case "say":
-            let text = (args["text"] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            model.message = text.isEmpty ? nil : text
-            router.publishState()
-            done(["ok": true, "text": model.text])
+        case "refresh":
+            let raw = (args["provider"] ?? "all").lowercased()
+            let providers: [Provider]?
+            if raw == "all" || raw.isEmpty {
+                providers = nil
+            } else if let provider = Provider(rawValue: raw) {
+                providers = [provider]
+            } else {
+                done(["ok": false, "error": "provider must be claude, codex or all"])
+                return
+            }
+            if let one = providers?.first, !model.settings.isEnabled(one) {
+                done(["ok": false, "error": "\(one.displayName) is off (settings set \(one.rawValue)Enabled=on)"])
+                return
+            }
+            guard model.canRead else {
+                done(["ok": true, "started": [String](), "online": false])
+                return
+            }
+            let started = model.refresh(providers, trigger: .user)
+            done(["ok": true, "started": started.map(\.rawValue), "online": true])
+        case "usage":
+            done(model.usageJSON)
         case "show", "hide", "toggle":
             switch name {
             case "show": panel.show()

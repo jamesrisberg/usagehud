@@ -2,17 +2,29 @@
   "id": "xyz.machud.usagehud",
   "name": "UsageHUD",
   "socket": "usagehud",
-  "iconName": "sparkles",
+  "iconName": "gauge.with.dots.needle.50percent",
   "panels": [
     {
       "id": "main",
-      "title": "UsageHUD",
-      "symbol": "sparkles",
+      "title": "Usage",
+      "symbol": "gauge.with.dots.needle.50percent",
       "kind": "hover",
-      "order": 90,
-      "defaultSize": [320, 160],
-      "verbs": ["show", "hide", "toggle", "frame", "say"],
+      "order": 6,
+      "defaultSize": [340, 392],
+      "verbs": ["show", "hide", "toggle", "frame", "refresh", "usage"],
       "settingsSchema": "settings.json"
+    },
+    {
+      "id": "usage",
+      "title": "Usage",
+      "symbol": "gauge.with.dots.needle.50percent",
+      "kind": "widget",
+      "widget": {
+        "sizes": ["small", "medium"],
+        "defaultSize": "small",
+        "multiple": true,
+        "refresh": 60
+      }
     }
   ]
 }

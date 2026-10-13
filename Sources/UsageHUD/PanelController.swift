@@ -10,7 +10,7 @@ import SwiftUI
 /// when the pointer leaves (`panel hide to=`).
 @MainActor
 final class PanelController {
-    static let size = CGSize(width: 320, height: 160)
+    static let size = CGSize(width: 340, height: 392)
 
     let model: AppModel
     let window: HUDPanelWindow

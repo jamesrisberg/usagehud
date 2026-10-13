@@ -6,6 +6,8 @@ import Foundation
 ///   `<home>/preferences.json`); default `~/Library/Application Support/UsageHUD`.
 /// - `USAGEHUD_SOCKET`: socket name under MacHUD's sockets directory; default `usagehud`.
 /// - `USAGEHUD_NO_HOTKEYS`: set to skip registering global hotkeys.
+/// - `USAGEHUD_OFFLINE`: set to read no credentials and send no request (the cached readings
+///   are shown as they are); for test instances.
 enum AppEnvironment {
     static let environment = ProcessInfo.processInfo.environment
 
@@ -21,9 +23,14 @@ enum AppEnvironment {
 
     static var settingsURL: URL { baseDirectory.appendingPathComponent("preferences.json") }
 
+    /// The last good readings and the backoff (numbers only, no tokens).
+    static var cacheURL: URL { baseDirectory.appendingPathComponent("usage-cache.json") }
+
     static func socketName(default name: String) -> String { nonEmpty("USAGEHUD_SOCKET") ?? name }
 
     static var hotKeysEnabled: Bool { environment["USAGEHUD_NO_HOTKEYS"] == nil }
+
+    static var offline: Bool { environment["USAGEHUD_OFFLINE"] != nil }
 
     private static func nonEmpty(_ key: String) -> String? {
         environment[key].flatMap { $0.isEmpty ? nil : $0 }

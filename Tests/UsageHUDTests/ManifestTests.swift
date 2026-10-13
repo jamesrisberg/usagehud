@@ -22,6 +22,10 @@ final class ManifestTests: XCTestCase {
         XCTAssertEqual(manifest.socket, "usagehud", "socket name = CLI name = repo name")
         let panel = try XCTUnwrap(manifest.panel(id: ControlHost.panelID))
         XCTAssertEqual(panel.kind, .hover)
+        XCTAssertTrue(panel.verbs.contains("frame"), "MacHUD places the panel with panel frame")
+        let widget = try XCTUnwrap(manifest.panel(id: ControlHost.widgetType))
+        XCTAssertEqual(widget.kind, .widget)
+        XCTAssertEqual(manifest.dockPanels.map(\.id), [ControlHost.panelID])
     }
 
     @MainActor
