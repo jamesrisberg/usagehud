@@ -6,6 +6,11 @@ All notable changes to UsageHUD are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-13
+
+### Changed
+- UsageHUD has its own icon, a lime gauge, in Finder, the menu bar and MacHUD's app list.
+
 ## [0.1.0] - 2026-10-13
 
 ### Added
