@@ -32,9 +32,12 @@ ls ~/dev            # hudkit  usagehud
 `install.sh` builds a release, quits a running copy, installs `/Applications/UsageHUD.app`, links
 the `usagehud` command onto your PATH and launches it.
 
-The first read of Claude Code's sign-in shows the Keychain's prompt ("UsageHUD wants to use your
-confidential information stored in Claude Code-credentials"). Choose **Always Allow**. If you
-choose Deny, UsageHUD shows "No access" and does not ask again until you press Refresh.
+There is nothing to allow: UsageHUD reads Claude Code's Keychain item through
+`/usr/bin/security`, the tool Claude Code wrote it with, so the item already trusts it and no
+prompt appears (and rebuilding or re-signing UsageHUD changes nothing). If the Keychain ever
+refuses, Claude shows "Needs you" and is not tried again until Claude Code updates its sign-in or
+you press Refresh; that refresh is the one time the Keychain may ask, and for this item it can
+ask for your login password.
 
 ## Use
 
@@ -55,28 +58,32 @@ Each provider's header says how fresh its numbers are:
 | State | Means |
 |---|---|
 | Live | read from the provider within the last two polls |
-| *2h 5m old* | the last good reading, kept because the latest read failed or is overdue; the meters turn grey |
+| *2h 5m old* | the last good reading, kept because the latest read failed or is overdue; the meters turn grey, and a window that has reset since shows "reset, waiting for a new reading" |
 | From log, *25m old* | Codex could not be reached (or is signed out): the numbers are from Codex's own session logs |
 | Reading… | the first read is on its way |
 | Sign-in expired / Signed out | no reading yet; the hint says what to run |
-| No access | the Keychain prompt was denied; Refresh asks again |
+| Needs you | the Keychain refused Claude Code's sign-in to `security`; Refresh tries again |
 | Unavailable | the provider refused or failed; the hint says why and when the next try is |
 
 Where the numbers come from:
 
 - **Claude**: `GET https://api.anthropic.com/api/oauth/usage` with Claude Code's OAuth access
-  token (the plaintext `~/.claude/.credentials.json` when it exists, else the Keychain item
-  `Claude Code-credentials`; run with `CLAUDE_CONFIG_DIR` set, UsageHUD reads that directory's
-  file and item, as Claude Code names them).
+  token: from the plaintext `~/.claude/.credentials.json` when it exists, else from the Keychain
+  item `Claude Code-credentials` with `/usr/bin/security find-generic-password -s
+  "Claude Code-credentials" -a <login name> -w` (run with `CLAUDE_CONFIG_DIR` set, UsageHUD
+  reads that directory's file and item, as Claude Code names them). Before reading the secret,
+  UsageHUD reads only the item's modification date; the secret is read again only when that
+  changes, so an expired, unchanged sign-in costs nothing. The token is held in memory, sent
+  only to api.anthropic.com, and never written anywhere.
 - **Codex**: `GET https://chatgpt.com/backend-api/wham/usage` with the access token and account id
   from `~/.codex/auth.json` (`CODEX_HOME` if set). Offline, signed out or expired: the newest
   `rate_limits` record in `~/.codex/sessions/**/*.jsonl`, shown with its age.
 
 Reads happen every `pollMinutes` (default 5), at launch, and when the panel opens if the last read
 is over a minute old. A failed read backs that provider off: 2 minutes, doubling to 30 (a
-`Retry-After` from the provider wins). The last good readings are kept in
-`<home>/usage-cache.json` (numbers only, mode 0600), so the panel has numbers the moment it
-launches. Tokens are only ever held in memory.
+`Retry-After` from the provider wins). Redirects are refused, so a token never follows one. The
+last good readings are kept in `<home>/usage-cache.json` (numbers only, created 0600), so the
+panel has numbers the moment it launches. Tokens are only ever held in memory.
 
 ## MacHUD contract
 
@@ -132,23 +139,25 @@ The app and menu bar icons (`AppIcon.icns`, `MenuBarIcon.png`, `MenuBarIcon@2x.p
 `Sources/UsageHUD/Resources`) are HUDKit's placeholder. Draw the app's glyph in
 `../hudkit/Icons/usagehud.svg` (see its README) and run `../hudkit/scripts/hud-icon.sh usagehud .`
 
-The Keychain grant belongs to the app's code signature: a build signed with your Apple
-Development identity keeps it across rebuilds, an ad-hoc signed one asks again after each build.
-
 ## Isolation env vars for testing
 
-| Variable | Effect |
-|---|---|
-| `USAGEHUD_HOME` | base directory for everything UsageHUD writes (default `~/Library/Application Support/UsageHUD`) |
-| `USAGEHUD_SOCKET` | socket name (default `usagehud`); the CLI honours it too |
-| `USAGEHUD_NO_HOTKEYS` | set to skip registering global hotkeys |
-| `USAGEHUD_OFFLINE` | set to read no credential and send no request; the cached readings are shown as they are |
+**Run a test instance with `USAGEHUD_OFFLINE=1` and `HUD_NO_ANNOUNCE=1`**, plus its own home,
+socket and no hotkeys. Offline it reads no credential and sends no request, and without the
+announcement it stays out of your MacHUD dock:
 
 ```sh
-USAGEHUD_HOME=$(mktemp -d) USAGEHUD_SOCKET=usagehud-test USAGEHUD_NO_HOTKEYS=1 USAGEHUD_OFFLINE=1 HUD_NO_ANNOUNCE=1 \
+USAGEHUD_OFFLINE=1 HUD_NO_ANNOUNCE=1 USAGEHUD_HOME=$(mktemp -d) USAGEHUD_SOCKET=usagehud-test USAGEHUD_NO_HOTKEYS=1 \
   build/UsageHUD.app/Contents/MacOS/UsageHUD &
 USAGEHUD_SOCKET=usagehud-test build/UsageHUD.app/Contents/Helpers/usagehud hello
 ```
+
+| Variable | Effect |
+|---|---|
+| `USAGEHUD_OFFLINE` | set to read no credential and send no request; the cached readings are shown as they are |
+| `HUD_NO_ANNOUNCE` | `1`: the build and the launch are not announced to MacHUD |
+| `USAGEHUD_HOME` | base directory for everything UsageHUD writes (default `~/Library/Application Support/UsageHUD`); it does not imply offline |
+| `USAGEHUD_SOCKET` | socket name (default `usagehud`); the CLI honours it too |
+| `USAGEHUD_NO_HOTKEYS` | set to skip registering global hotkeys |
 
 ## License
 

@@ -16,7 +16,7 @@ UsageHUD adds.
 - Hover: `panel show from=<edge> anchor=x,y,w,h` slides the panel out of the dock next to the
   button (`HUDPanelTransition.panelFrame`, `HUDAnimation.slide(in:)`); `panel hide to=<edge>` slides
   it back while fading out. Without options it fades in or out where it is. It never takes focus.
-  A show reads every provider whose last attempt is over a minute old.
+  A show reads every provider whose last attempt is over a minute old (see Pacing below).
 - Widget: the panel's meters, compact (small: Claude's two fullest windows and Codex's fullest;
   medium: both providers with credits). A tap opens the panel. MacHUD places and syncs the
   instances (`widget sync|create|update|remove|edit|reveal`, HUDKit's `HUDWidgetHost`).
@@ -55,7 +55,7 @@ UsageHUD adds.
 | `status` | `live`, `stale`, `loading`, `signedOut`, `error` or `off` |
 | `inFlight` | a read is running |
 | `lastReading` | the last good reading, when there is one: `source` (`live` or `sessionLog`), `observedAt` (ISO 8601), `ageSeconds`, `plan`, `windows` (`id`, `label`, `kind`: `session`/`weekly`/`model`/`monthly`/`other`, `percentUsed` 0-100, `resetsAt`, `resetsInSeconds`), `credits` (`hasCredits`, `unlimited`, `balance`) |
-| `problem`, `hint` | why the last attempt gave no reading (`signedOut`, `expired`, `unauthorized`, `keychainDenied`, `keychainNeedsApproval`, `rateLimited`, `server`, `network`, `badPayload`, `credentials`) and the panel's line for it |
+| `problem`, `hint` | why the last attempt gave no reading (`signedOut`, `expired`, `unauthorized`, `keychainNeedsApproval`, `rateLimited`, `server`, `network`, `badPayload`, `credentials`) and the panel's line for it |
 | `lastAttemptAt`, `retryAt` | the last attempt, and when a backed-off provider is tried again |
 
 A reading is `live` when the last attempt succeeded from the provider's endpoint and it is
@@ -72,24 +72,48 @@ UsageHUD sends exactly two requests, both `GET` without a body:
 
 - A token is never refreshed, rotated or written: an expired one (`expiresAt`, or the JWT's `exp`,
   within a minute) is not sent, and the panel says "Open Claude Code to refresh your sign-in" /
-  "Run codex to sign in". Refresh tokens are never read into memory. Claude's access token is
-  held in memory until it expires or is refused (a 401 or 403 rereads the store once and retries
-  once with a different token); Codex's is reread on every attempt.
-- The Keychain: the first read ever may show its prompt; once a read succeeded, scheduled reads
-  ask the Keychain not to prompt (an item that would prompt reads as `keychainNeedsApproval`);
-  after a denial no scheduled read asks again, and only `refresh` (the button, the menu, the
-  CLI) does. The denial survives a relaunch.
+  "Run codex to sign in". Each access token is sent only to its own provider's host above, and
+  kept only in memory. Refresh tokens pass through the JSON parser and are never kept or sent.
+- How Claude's token is read. `stamp` first, which reads no secret: the plaintext file's
+  modification date when the file holds a token, else the Keychain item's attributes only
+  (`SecItemCopyMatching` with `kSecReturnAttributes`, never `kSecReturnData`), for
+  `kSecAttrModificationDate`. The secret is read only when no token is held or that stamp
+  changed: from the file, or by running `/usr/bin/security find-generic-password -s
+  "Claude Code-credentials" -a <login name> -w` (fixed path, an argument array, no shell, stdin
+  closed, stderr discarded, stdout kept in memory and zeroed after parsing; 10 s timeout, 60 s
+  for the owner's refresh). Claude Code writes its item with `security`, so the item's access
+  list already trusts that tool: the read shows no prompt and does not depend on UsageHUD's own
+  signature. An expired token in an unchanged store costs a metadata read and nothing else.
+- A 401 rereads the store only if its stamp changed since the token was read, then retries once
+  with the new token; a 403 is the provider's error (`server`), and never touches the store.
+- If `security` is refused (exit 36 interaction not allowed, 51 authorization failed, 128
+  canceled) or does not answer in time, Claude reads as `keychainNeedsApproval` ("needs you")
+  and the item is not read again until it changes or the owner refreshes (the button, the menu,
+  `usagehud refresh`). That refusal survives a relaunch. If the item's access list no longer
+  trusts `security`, the owner's refresh is what may bring up the Keychain's own prompt, which
+  for a `security`-created item can ask for the login password.
 - Codex offline fallback: after any failed Codex read, the newest record with a non-null
-  `rate_limits` (`primary`/`secondary` `{used_percent, window_minutes, resets_at}`, `credits`,
-  `plan_type`) in the six newest `<codex home>/sessions/YYYY/MM/DD/*.jsonl` files replaces the
-  reading when it is newer, with `source: sessionLog`.
-- Pacing: a read every `pollMinutes`, at launch and on a panel show (each skipped when the last
-  attempt is under a minute old). A failed request backs the provider off 2 minutes, doubling to
-  30 (`Retry-After`, seconds or a date, wins, capped at 30); `refresh` bypasses the wait, and a
-  failure under it still advances the backoff. Signed out or expired sends nothing and does not
-  back off.
-- `<home>/usage-cache.json` (mode 0600) keeps each provider's last good reading, the backoff and
-  the Keychain decision: numbers, dates and plan names, never a token.
+  `rate_limits` (`primary`/`secondary` `{used_percent, window_minutes, resets_at}`, or the older
+  `resets_in_seconds` from the record's timestamp, `credits`, `plan_type`) in the six most
+  recently written `<codex home>/sessions/**/*.jsonl` files (by modification date, so a long
+  session in an older date folder counts) replaces the reading when it is newer, with
+  `source: sessionLog`. Files are read backwards in 256 KB chunks, off the service's actor, and
+  each file's answer is remembered until its device, inode, size or modification date changes.
+- Pacing: a read every `pollMinutes` and at launch (skipped within 30 s of the last attempt, and
+  while backing off), and on a panel show (skipped within a minute of the last attempt, and
+  while a remote problem backs off; a local one, signed out, expired or the Keychain, is checked
+  again at once, which sends nothing). Every Claude failure backs off 2 minutes, doubling to 30;
+  Codex's network failures do the same, its local ones do not (they send nothing, and the
+  session log fills in). `Retry-After`, seconds or a date, wins, capped at 30. `refresh`
+  bypasses the wait, and a failure under it still advances the backoff.
+- Redirects are refused: a 3xx is the provider's error, so the bearer, the account id and the
+  user agent never go anywhere but the two hosts.
+- A window whose reset time has passed since its reading no longer holds its number: the panel
+  shows "reset, waiting for a new reading", `usage` marks it `hasReset`, and it leaves the
+  badge and the status line.
+- `<home>/usage-cache.json` keeps each provider's last good reading, the backoff and the
+  Keychain refusal's stamp: numbers, dates and plan names, never a token. It is written to a
+  temporary file created 0600 and renamed into place.
 
 ## Settings
 
@@ -127,7 +151,7 @@ turns `menuBar.consumed` off. `HUDEditMenu` is installed at launch.
 | Flag | Effect |
 |---|---|
 | `--snapshot <path.png>` | show the panel over sample readings, write a PNG of it after 1 s, print the path and quit |
-| `--snapshot-state <state>` | with `--snapshot`: `live` (default), `stale`, `loading`, `signedout`, `error`, `denied` or `off` |
+| `--snapshot-state <state>` | with `--snapshot`: `live` (default), `stale`, `loading`, `signedout`, `error`, `needsyou` or `off` |
 | `--snapshot-widgets <dir>` | write `usage-<size>[-<state>].png` for both sizes in the `live`, `stale`, `signedout` and `loading` states, print the paths and quit |
 
 Snapshots serve no socket, announce nothing, register no hotkey, add no menu bar item, read no

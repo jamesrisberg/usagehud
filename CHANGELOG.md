@@ -11,10 +11,12 @@ All notable changes to UsageHUD are documented here. The format follows
   (Claude's session, weekly and top-model weekly; Codex's windows and credits), each with when
   it resets.
 - A desktop widget with the same meters, small or medium.
-- Clear states for each subscription: live, stale (with its age), reading, signed out, no
-  access and unavailable, with a plain hint about what to do.
+- Clear states for each subscription: live, stale (with its age), reading, signed out, needs
+  you and unavailable, with a plain hint about what to do. A window that has reset since its
+  last reading says so instead of showing an old number.
 - Uses the sign-ins Claude Code and Codex already have, read-only: UsageHUD never refreshes
-  them, so it never signs you out of either.
+  them, so it never signs you out of either. Claude Code's is read from the Keychain without a
+  prompt, and only when it has changed.
 - Works offline: the last readings are kept and shown as stale, and Codex falls back to its own
   session logs.
 - Settings: how often to check, and Claude and Codex each on or off.
