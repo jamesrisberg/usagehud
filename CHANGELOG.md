@@ -6,11 +6,18 @@ All notable changes to UsageHUD are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-10-13
-
 ### Added
-- Hover panel `main` on HUD glass, shown from the menu bar, Control-Option-H or the MacHUD dock.
-- MacHUD contract through HUDKit: manifest, settings schema (`greeting`, `showCount`), `action say`.
-- Menu bar consolidation (`menu`, `menu-invoke`, `HUDStatusItemPolicy` with the
-  `menuBar.consumed` opt-out in `<home>/menubar.json`) and HUDKit's Edit menu.
-- `usagehud` CLI, `--snapshot <png>`, `USAGEHUD_HOME` / `_SOCKET` / `_NO_HOTKEYS` isolation.
+- See how much of your Claude and Codex subscriptions you have used: a meter per window
+  (Claude's session, weekly and top-model weekly; Codex's windows and credits), each with when
+  it resets.
+- A desktop widget with the same meters, small or medium.
+- Clear states for each subscription: live, stale (with its age), reading, signed out, no
+  access and unavailable, with a plain hint about what to do.
+- Uses the sign-ins Claude Code and Codex already have, read-only: UsageHUD never refreshes
+  them, so it never signs you out of either.
+- Works offline: the last readings are kept and shown as stale, and Codex falls back to its own
+  session logs.
+- Settings: how often to check, and Claude and Codex each on or off.
+- `usagehud usage` and `usagehud refresh` on the command line.
+- Control-Option-U shows or hides the panel; inside MacHUD it is a hover button in the tool
+  dock, and MacHUD hosts its menu.
