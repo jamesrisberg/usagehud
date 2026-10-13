@@ -16,7 +16,7 @@
       "title": "Show Claude",
       "type": "bool",
       "default": true,
-      "help": "Reads Claude Code's sign-in from the Keychain (asks once: choose Always Allow)."
+      "help": "Reads Claude Code's sign-in from its credentials file, or from the Keychain through /usr/bin/security, which the item already trusts (no prompt)."
     },
     {
       "key": "codexEnabled",

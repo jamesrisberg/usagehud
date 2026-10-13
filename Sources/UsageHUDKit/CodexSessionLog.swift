@@ -8,10 +8,12 @@ import Foundation
 /// conversation) is never decoded beyond finding that object.
 public struct CodexSessionLog: Sendable {
     public let sessionsDirectory: URL
-    /// How many of the newest log files to look through.
+    /// How many of the most recently written log files to look through.
     public var fileLimit = 6
-    /// How much of the end of each file to read first.
-    public var tailBytes = 512 * 1024
+    /// How much of a file is read at a time, from the end backwards.
+    public var chunkBytes = 256 * 1024
+    /// Each file's last answer, by its identity: an unchanged file is never read twice.
+    let memo = Memo()
 
     public init(sessionsDirectory: URL) {
         self.sessionsDirectory = sessionsDirectory
@@ -21,7 +23,7 @@ public struct CodexSessionLog: Sendable {
         self.init(sessionsDirectory: codexHome.appendingPathComponent("sessions", isDirectory: true))
     }
 
-    /// The newest reading across the newest log files, or nil when none has one.
+    /// The newest reading across the most recently written log files, or nil when none has one.
     public func latestReading() -> UsageReading? {
         var best: UsageReading?
         for file in newestFiles() {
@@ -31,53 +33,93 @@ public struct CodexSessionLog: Sendable {
         return best
     }
 
-    /// The newest `.jsonl` files: the date directories are walked newest first (they are named
-    /// by number), so a large history costs nothing.
+    /// The `.jsonl` files under the sessions directory written most recently, by modification
+    /// date: a long session started days ago, in an older date folder, is still found while
+    /// Codex writes to it.
     func newestFiles() -> [URL] {
-        let fm = FileManager.default
-        func children(_ url: URL) -> [URL] {
-            (try? fm.contentsOfDirectory(at: url, includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
-                                         options: [.skipsHiddenFiles])) ?? []
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .isRegularFileKey]
+        guard let walker = FileManager.default.enumerator(at: sessionsDirectory, includingPropertiesForKeys: keys,
+                                                           options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return [] }
+        var files: [(url: URL, modified: Date)] = []
+        for case let url as URL in walker where url.pathExtension == "jsonl" {
+            guard let values = try? url.resourceValues(forKeys: Set(keys)), values.isRegularFile == true else { continue }
+            files.append((url, values.contentModificationDate ?? .distantPast))
         }
-        func numbered(_ url: URL) -> [URL] {
-            children(url).filter { Int($0.lastPathComponent) != nil }
-                .sorted { Int($0.lastPathComponent)! > Int($1.lastPathComponent)! }
-        }
-        func modified(_ url: URL) -> Date {
-            (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-        }
-        var files: [URL] = []
-        outer: for year in numbered(sessionsDirectory) {
-            for month in numbered(year) {
-                for day in numbered(month) {
-                    let logs = children(day).filter { $0.pathExtension == "jsonl" }.sorted { modified($0) > modified($1) }
-                    files.append(contentsOf: logs)
-                    // A day can hold an older session that was written to most recently, so a
-                    // whole day is taken before stopping.
-                    if files.count >= fileLimit { break outer }
-                }
-            }
-        }
-        // Files directly in sessions/ (older layouts).
-        files.append(contentsOf: children(sessionsDirectory).filter { $0.pathExtension == "jsonl" })
-        return Array(files.sorted { modified($0) > modified($1) }.prefix(fileLimit))
+        return files.sorted { $0.modified > $1.modified }.prefix(fileLimit).map(\.url)
     }
 
-    /// The last record with a `rate_limits` object in one file: its tail first, the whole file
-    /// when the tail has none.
+    /// The last record with a `rate_limits` object in one file, read backwards a chunk at a
+    /// time, remembered until the file changes (device, inode, size, modification date).
     func latestReading(in file: URL) -> UsageReading? {
+        guard let identity = FileIdentity(file) else { return nil }
+        if let known = memo.answer(for: file, identity: identity) { return known.reading }
+        let reading = scanBackwards(file)
+        memo.remember(file, identity: identity, reading: reading)
+        return reading
+    }
+
+    private func scanBackwards(_ file: URL) -> UsageReading? {
         guard let handle = try? FileHandle(forReadingFrom: file) else { return nil }
         defer { try? handle.close() }
-        let size = (try? handle.seekToEnd()) ?? 0
-        let start = size > UInt64(tailBytes) ? size - UInt64(tailBytes) : 0
-        try? handle.seek(toOffset: start)
-        if let tail = try? handle.readToEnd(), let reading = Self.latestReading(inLines: tail, partialFirstLine: start > 0) {
-            return reading
+        var end = (try? handle.seekToEnd()) ?? 0
+        // Bytes after the last newline seen so far: the start of a line the next chunk completes.
+        var carry = Data()
+        while end > 0 {
+            let start = end > UInt64(chunkBytes) ? end - UInt64(chunkBytes) : 0
+            try? handle.seek(toOffset: start)
+            guard var chunk = try? handle.read(upToCount: Int(end - start)) else { return nil }
+            chunk.append(carry)
+            if start > 0, let firstNewline = chunk.firstIndex(of: UInt8(ascii: "\n")) {
+                // Everything before the first newline may be a partial line: keep it for later.
+                carry = chunk.subdata(in: chunk.startIndex..<firstNewline)
+                chunk = chunk.subdata(in: chunk.index(after: firstNewline)..<chunk.endIndex)
+            } else if start > 0 {
+                carry = chunk
+                end = start
+                continue
+            } else {
+                carry = Data()
+            }
+            if let reading = Self.latestReading(inLines: chunk) { return reading }
+            end = start
         }
-        guard start > 0, size <= 64 * 1024 * 1024 else { return nil }
-        try? handle.seek(toOffset: 0)
-        guard let whole = try? handle.readToEnd() else { return nil }
-        return Self.latestReading(inLines: whole, partialFirstLine: false)
+        return carry.isEmpty ? nil : Self.latestReading(inLines: carry)
+    }
+
+    /// What identifies a file's contents without reading them.
+    struct FileIdentity: Equatable {
+        var device: UInt64, inode: UInt64, size: UInt64, modified: Date
+
+        init?(_ url: URL) {
+            guard let a = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+            device = (a[.systemNumber] as? NSNumber)?.uint64Value ?? 0
+            inode = (a[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+            size = (a[.size] as? NSNumber)?.uint64Value ?? 0
+            modified = a[.modificationDate] as? Date ?? .distantPast
+        }
+    }
+
+    final class Memo: @unchecked Sendable {
+        struct Entry { var identity: FileIdentity; var reading: UsageReading? }
+        private var entries: [URL: Entry] = [:]
+        private let lock = NSLock()
+        /// How many files were read rather than remembered (tests).
+        private(set) var scans = 0
+
+        func answer(for url: URL, identity: FileIdentity) -> Entry? {
+            lock.lock(); defer { lock.unlock() }
+            guard let entry = entries[url], entry.identity == identity else { return nil }
+            return entry
+        }
+
+        func remember(_ url: URL, identity: FileIdentity, reading: UsageReading?) {
+            lock.lock(); defer { lock.unlock() }
+            scans += 1
+            entries[url] = Entry(identity: identity, reading: reading)
+            if entries.count > 64 { entries = entries.filter { $0.key == url } }
+        }
+
+        var scanCount: Int { lock.lock(); defer { lock.unlock() }; return scans }
     }
 
     /// Scans JSON lines from the end for the newest record with a non-null `rate_limits`.
@@ -96,7 +138,8 @@ public struct CodexSessionLog: Sendable {
 
     /// One record: `{"timestamp", "payload": {"rate_limits": {primary, secondary, credits,
     /// plan_type}}}`. `primary`/`secondary` are `{used_percent, window_minutes, resets_at}` with
-    /// `resets_at` in unix seconds. Nil when `rate_limits` is null or has no window.
+    /// `resets_at` in unix seconds (older logs: `resets_in_seconds`, from the record's
+    /// timestamp). Nil when `rate_limits` is null or has no window.
     public static func reading(fromRecord record: [String: Any]) -> UsageReading? {
         let payload = record["payload"] as? [String: Any]
         guard let limits = (payload?["rate_limits"] ?? record["rate_limits"]) as? [String: Any],
@@ -106,7 +149,8 @@ public struct CodexSessionLog: Sendable {
             guard let w = raw as? [String: Any] else { return nil }
             let minutes = PayloadValues.number(w["window_minutes"])
             return CodexUsage.window(usedPercent: w["used_percent"], seconds: minutes.map { Int($0 * 60) },
-                                     resetsAt: PayloadValues.date(w["resets_at"]),
+                                     resetsAt: PayloadValues.date(w["resets_at"])
+                                        ?? PayloadValues.number(w["resets_in_seconds"]).map { observed.addingTimeInterval($0) },
                                      fallbackID: fallbackID, fallbackSeconds: fallbackSeconds, exhausted: exhausted)
         }
         let windows = CodexUsage.assemble(primary: shape(limits["primary"], "five_hour", 18000),

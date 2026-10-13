@@ -98,7 +98,8 @@ private struct WidgetProvider: View {
     private var picked: [UsageWindow] {
         let all = model.meters(provider)
         guard all.count > limit else { return all }
-        let keep = Set(all.sorted { ($0.percentUsed ?? 0) > ($1.percentUsed ?? 0) }.prefix(limit).map(\.id))
+        let now = model.now
+        let keep = Set(all.sorted { ($0.currentPercent(at: now) ?? 0) > ($1.currentPercent(at: now) ?? 0) }.prefix(limit).map(\.id))
         return all.filter { keep.contains($0.id) }
     }
 

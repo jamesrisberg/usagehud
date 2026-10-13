@@ -70,8 +70,9 @@ public enum ClaudeUsage {
 }
 
 /// Claude Code's OAuth access token, as read from its credentials store. Only what a usage
-/// read needs is kept: the access token, its expiry and the plan. The refresh token is never
-/// read into memory, and no description of this value contains the access token.
+/// read needs is kept: the access token, its expiry and the plan. The refresh token passes
+/// through the JSON parser and is never kept or sent; the access token is sent only to
+/// api.anthropic.com, and no description of this value contains it.
 public struct ClaudeToken: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     public let accessToken: String
     public let expiresAt: Date?

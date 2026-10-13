@@ -61,11 +61,12 @@ public enum UsageFormat {
         return parts.isEmpty ? "<1m" : parts.joined(separator: " ")
     }
 
-    /// `resets in 2h 13m`; `resetting` once the instant has passed (the next read starts over).
+    /// `resets in 2h 13m`; once the instant has passed, the old number no longer holds:
+    /// `reset, waiting for a new reading`.
     public static func resets(_ date: Date?, now: Date) -> String? {
         guard let date else { return nil }
         let left = date.timeIntervalSince(now)
-        return left <= 0 ? "resetting" : "resets in \(duration(left))"
+        return left <= 0 ? "reset, waiting for a new reading" : "resets in \(duration(left))"
     }
 
     /// `just now`, `3m ago`, `2h 5m ago`.

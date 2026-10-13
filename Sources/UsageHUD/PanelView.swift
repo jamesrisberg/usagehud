@@ -103,7 +103,7 @@ private struct ProviderSection: View {
         guard status != .off, let record else { return nil }
         if let problem = record.problem {
             var text = problem.hint(for: provider)
-            if problem.backsOff, let retry = record.retryAt, retry > model.now {
+            if problem.isRemote, let retry = record.retryAt, retry > model.now {
                 text += " · retrying in \(UsageFormat.duration(retry.timeIntervalSince(model.now)))"
             }
             return text
@@ -146,7 +146,7 @@ private struct StatusChip: View {
         case .signedOut:
             switch problem {
             case .expired?: return "Sign-in expired"
-            case .keychainDenied?, .keychainNeedsApproval?: return "No access"
+            case .keychainNeedsApproval?: return "Needs you"
             default: return "Signed out"
             }
         case .error: return "Unavailable"
@@ -184,11 +184,11 @@ struct MeterRow: View {
                         .monospacedDigit()
                 }
                 Spacer(minLength: 4)
-                Text(UsageFormat.percent(window.percentUsed))
+                Text(UsageFormat.percent(window.currentPercent(at: now)))
                     .font(.system(size: compact ? 11 : 13, weight: .semibold, design: .rounded))
                     .monospacedDigit()
             }
-            MeterBar(percent: window.percentUsed, dimmed: dimmed, height: compact ? 5 : 6)
+            MeterBar(percent: window.currentPercent(at: now), dimmed: dimmed, height: compact ? 5 : 6)
         }
         .accessibilityElement(children: .combine)
     }

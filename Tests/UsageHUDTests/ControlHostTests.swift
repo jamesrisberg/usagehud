@@ -37,10 +37,19 @@ final class ControlHostTests: XCTestCase {
         XCTAssertEqual(panelState?["badge"] as? String, "93%", "Codex's session is the fullest")
         XCTAssertEqual(panelState?["status"] as? String, "Claude 42% session, 23% weekly · Codex 93% session, 8% weekly")
         makeHost(.stale)
-        XCTAssertEqual(panelState?["status"] as? String, "Claude 42% session, 23% weekly (stale) · Codex 93% session, 8% weekly (stale)")
+        XCTAssertEqual(panelState?["status"] as? String, "Claude 23% weekly (stale) · Codex 93% session, 8% weekly (stale)",
+                       "Claude's session window reset after its reading, so its old 42% is gone")
         makeHost(.signedout)
         XCTAssertNil(panelState?["badge"])
         XCTAssertEqual(panelState?["status"] as? String, "Claude signed out · Codex signed out")
+    }
+
+    func testAWindowPastItsResetDropsOutOfTheBadge() {
+        let model = AppModel(settingsURL: nil, records: SnapshotSamples.records(.stale, now: now), now: now)
+        try? model.updateSettings(["codexEnabled": "off"])
+        XCTAssertEqual(model.badge, "78%", "the reset session (42%) is unknown now; the Fable weekly is the fullest")
+        let windows = (((model.usageJSON["providers"] as? [String: Any])?["claude"] as? [String: Any])?["lastReading"] as? [String: Any])?["windows"] as? [[String: Any]]
+        XCTAssertEqual(windows?.first?["hasReset"] as? Bool, true)
     }
 
     func testUsageReportsReadingsAndAges() throws {

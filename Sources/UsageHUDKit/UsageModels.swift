@@ -85,6 +85,17 @@ public struct UsageReading: Codable, Equatable, Sendable {
     }
 }
 
+extension UsageWindow {
+    /// Whether the window has started over since the reading: its old number no longer holds.
+    public func hasReset(at now: Date) -> Bool {
+        guard let resetsAt else { return false }
+        return resetsAt <= now
+    }
+
+    /// The percentage that still holds at `now`: nil once the window has reset.
+    public func currentPercent(at now: Date) -> Double? { hasReset(at: now) ? nil : percentUsed }
+}
+
 extension UsageReading {
     /// The windows worth a meter: every session, weekly and monthly window, the top model's
     /// weekly cap, and the other per-model and extra windows (Opus, OAuth apps, Cowork) only
@@ -106,11 +117,11 @@ public enum FetchProblem: Codable, Equatable, Sendable {
     case signedOut
     /// The stored access token has expired. UsageHUD never refreshes it: the CLI that owns it does.
     case expired
-    /// The endpoint refused the token (401/403).
+    /// The endpoint refused the token (401).
     case unauthorized
-    /// The owner denied UsageHUD access to Claude Code's Keychain item.
-    case keychainDenied
-    /// Reading the Keychain item would ask the owner again; only an explicit refresh asks.
+    /// The Keychain would not hand `/usr/bin/security` Claude Code's item without asking (or
+    /// the tool did not answer in time). Not tried again until the item changes or the owner
+    /// refreshes.
     case keychainNeedsApproval
     /// The endpoint answered 429.
     case rateLimited
@@ -123,19 +134,20 @@ public enum FetchProblem: Codable, Equatable, Sendable {
     /// The credentials store could not be read for another reason.
     case credentials(String)
 
-    /// Whether this problem came from a request that reached (or tried to reach) the network,
-    /// and so backs the provider off.
-    public var backsOff: Bool {
+    /// Whether this problem came from a request that reached (or tried to reach) the
+    /// provider. A panel opening waits out the backoff of these; a local problem (signed out,
+    /// expired, the Keychain) is checked again at once, since checking it sends nothing.
+    public var isRemote: Bool {
         switch self {
         case .unauthorized, .rateLimited, .server, .network, .badPayload: return true
-        case .signedOut, .expired, .keychainDenied, .keychainNeedsApproval, .credentials: return false
+        case .signedOut, .expired, .keychainNeedsApproval, .credentials: return false
         }
     }
 
-    /// Whether the owner has to sign in again (or allow access) before a reading can come.
+    /// Whether the owner has to sign in again (or answer the Keychain) before a reading can come.
     public var needsSignIn: Bool {
         switch self {
-        case .signedOut, .expired, .unauthorized, .keychainDenied, .keychainNeedsApproval: return true
+        case .signedOut, .expired, .unauthorized, .keychainNeedsApproval: return true
         default: return false
         }
     }
@@ -146,7 +158,6 @@ public enum FetchProblem: Codable, Equatable, Sendable {
         case .signedOut: return "signedOut"
         case .expired: return "expired"
         case .unauthorized: return "unauthorized"
-        case .keychainDenied: return "keychainDenied"
         case .keychainNeedsApproval: return "keychainNeedsApproval"
         case .rateLimited: return "rateLimited"
         case .server: return "server"
@@ -162,8 +173,7 @@ public enum FetchProblem: Codable, Equatable, Sendable {
         case (.signedOut, .claude): return "Sign in with Claude Code to see usage"
         case (.signedOut, .codex), (.expired, .codex), (.unauthorized, .codex): return "Run codex to sign in"
         case (.expired, .claude), (.unauthorized, .claude): return "Open Claude Code to refresh your sign-in"
-        case (.keychainDenied, _): return "Not allowed to read Claude Code's sign-in. Refresh to ask again"
-        case (.keychainNeedsApproval, _): return "Refresh to read Claude Code's sign-in (choose Always Allow)"
+        case (.keychainNeedsApproval, _): return "The Keychain held back Claude Code's sign-in. Refresh to try again"
         case (.rateLimited, _): return "\(provider.displayName) is rate-limiting usage reads"
         case (.server(let status), _): return "\(provider.displayName) answered \(status)"
         case (.network, _): return "Can't reach \(provider.displayName)"

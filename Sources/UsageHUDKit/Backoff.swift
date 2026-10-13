@@ -32,13 +32,13 @@ extension ProviderRecord {
         ProviderRecord(reading: reading, lastAttemptAt: now, lastSuccessAt: now, problem: nil, backoffLevel: 0, retryAt: nil)
     }
 
-    /// The record after a failed attempt: the last good reading is kept; a network-side
-    /// problem advances the backoff, a local one (signed out, expired) does not.
-    public func failed(_ problem: FetchProblem, at now: Date, retryAfter: TimeInterval? = nil) -> ProviderRecord {
+    /// The record after a failed attempt: the last good reading is kept, and with `backOff`
+    /// (every Claude failure; Codex's network ones) the next scheduled attempt waits longer.
+    public func failed(_ problem: FetchProblem, at now: Date, retryAfter: TimeInterval? = nil, backOff: Bool = true) -> ProviderRecord {
         var next = self
         next.lastAttemptAt = now
         next.problem = problem
-        if problem.backsOff {
+        if backOff {
             next.retryAt = now.addingTimeInterval(Backoff.delay(level: backoffLevel, retryAfter: retryAfter))
             next.backoffLevel = backoffLevel + 1
         } else {
@@ -48,11 +48,17 @@ extension ProviderRecord {
         return next
     }
 
-    /// Whether a scheduled (not user-asked) attempt should wait: backing off, or tried less
-    /// than `minimumSpacing` seconds ago.
-    public func shouldWait(at now: Date, minimumSpacing: TimeInterval) -> Bool {
-        if let retryAt, now < retryAt { return true }
-        if let lastAttemptAt, now.timeIntervalSince(lastAttemptAt) < minimumSpacing { return true }
-        return false
+    /// Whether an attempt with `trigger` should wait. The owner's refresh never waits. A poll
+    /// waits out any backoff and skips an attempt under 30 s old. A panel opening skips an
+    /// attempt under a minute old and waits out the backoff of a remote problem only: a local
+    /// one (signed out, expired, the Keychain) costs nothing to check again.
+    public func shouldWait(at now: Date, trigger: RefreshTrigger) -> Bool {
+        let backingOff = retryAt.map { now < $0 } ?? false
+        let age = lastAttemptAt.map { now.timeIntervalSince($0) } ?? .infinity
+        switch trigger {
+        case .user: return false
+        case .scheduled: return backingOff || age < 30
+        case .panelOpen: return age < 60 || (backingOff && problem?.isRemote == true)
+        }
     }
 }

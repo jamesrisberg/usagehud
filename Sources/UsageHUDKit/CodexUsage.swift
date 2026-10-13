@@ -86,8 +86,9 @@ public enum CodexUsage {
 }
 
 /// The ChatGPT access token Codex keeps in `auth.json`. Only the access token, the account id
-/// and the token's expiry (its JWT `exp`) are read; the refresh token is never read into
-/// memory, and no description of this value contains the access token.
+/// and the token's expiry (its JWT `exp`) are kept. The refresh token passes through the JSON
+/// parser and is never kept or sent; the access token is sent only to chatgpt.com, and no
+/// description of this value contains it.
 public struct CodexToken: Sendable, Equatable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     public let accessToken: String
     public let accountID: String?

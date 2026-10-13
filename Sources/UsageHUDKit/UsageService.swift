@@ -25,11 +25,14 @@ public protocol UsageTransport: Sendable {
 }
 
 /// The real transport: an ephemeral session with no cookie store and no URL cache, so neither
-/// a request's credentials nor an answer is ever written to disk.
+/// a request's credentials nor an answer is ever written to disk. Redirects are refused: the
+/// 3xx itself is the answer (read as a server error), so the bearer, the account id and the
+/// user agent never follow a redirect to another address.
 public final class URLSessionTransport: UsageTransport, @unchecked Sendable {
     private let session: URLSession
 
-    public init() {
+    /// `protocolClasses` lets tests answer requests in-process.
+    public init(protocolClasses: [AnyClass] = []) {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.urlCache = nil
         configuration.httpCookieStorage = nil
@@ -37,7 +40,8 @@ public final class URLSessionTransport: UsageTransport, @unchecked Sendable {
         configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 30
-        session = URLSession(configuration: configuration)
+        if !protocolClasses.isEmpty { configuration.protocolClasses = protocolClasses + (configuration.protocolClasses ?? []) }
+        session = URLSession(configuration: configuration, delegate: NoRedirects(), delegateQueue: nil)
     }
 
     public func send(_ request: URLRequest) async -> TransportResponse {
@@ -53,6 +57,13 @@ public final class URLSessionTransport: UsageTransport, @unchecked Sendable {
             return TransportResponse(status: nil, failure: (error as NSError).localizedDescription)
         }
     }
+
+    private final class NoRedirects: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
+    }
 }
 
 /// What a credentials lookup found.
@@ -60,17 +71,43 @@ public enum CredentialLookup<Token: Sendable>: Sendable {
     case found(Token)
     /// No credentials stored: not signed in.
     case missing
-    /// The owner denied access (Keychain).
-    case denied
-    /// Reading would prompt, and this read was not allowed to (Keychain).
+    /// The Keychain would not hand the item over without asking.
     case needsApproval
     case failed(String)
 }
 
-/// Reads Claude Code's token. `allowPrompt` false must never show the Keychain's prompt. A read
-/// that prompts waits for the owner, so it is async and must not block the caller's thread.
+/// Which store holds Claude Code's sign-in, and when it last changed. Reading it never touches
+/// the secret, so it is free and never asks anything.
+public struct CredentialStamp: Codable, Equatable, Sendable {
+    public enum Location: String, Codable, Sendable {
+        /// `<config>/.credentials.json`
+        case file
+        /// The login Keychain item.
+        case keychain
+    }
+
+    public var location: Location
+    /// The file's or the item's modification date; nil when the store does not say.
+    public var modified: Date?
+
+    public init(location: Location, modified: Date?) {
+        self.location = location
+        self.modified = modified
+    }
+}
+
+public enum StampLookup: Sendable {
+    case present(CredentialStamp)
+    case missing
+    case failed(String)
+}
+
+/// Claude Code's credentials store. `stamp()` reads only metadata (the file's modification
+/// date, the Keychain item's attributes); `read(_:patient:)` reads the secret. `patient` is the
+/// owner's own refresh, which may wait longer for the Keychain.
 public protocol ClaudeTokenSource: Sendable {
-    func read(allowPrompt: Bool) async -> CredentialLookup<ClaudeToken>
+    func stamp() async -> StampLookup
+    func read(_ location: CredentialStamp.Location, patient: Bool) async -> CredentialLookup<ClaudeToken>
 }
 
 /// Reads Codex's token.
@@ -91,29 +128,26 @@ public struct CodexAuthFile: CodexTokenSource {
     }
 }
 
-/// Why a read was started. Only `user` bypasses the backoff and may show the Keychain prompt
-/// after the first launch.
+/// Why a read was started.
 public enum RefreshTrigger: String, Sendable {
-    /// The poll timer.
+    /// The poll timer, and launch.
     case scheduled
-    /// Launch or the panel opening: skipped when the last attempt is under a minute old.
-    case opportunistic
-    /// The owner asked (refresh button, `usagehud refresh`).
+    /// The panel opening (or a provider turned on).
+    case panelOpen
+    /// The owner asked (refresh button, menu, `usagehud refresh`): past any backoff, and past
+    /// a Keychain refusal.
     case user
-
-    var minimumSpacing: TimeInterval {
-        switch self {
-        case .scheduled: return 30
-        case .opportunistic: return 60
-        case .user: return 0
-        }
-    }
 }
 
 /// Reads both providers' usage, read-only: it sends the two usage GETs and nothing else. It
 /// never refreshes, rotates or writes a token (both CLIs rotate their refresh tokens, so a
 /// refresh here would sign the owner out of Claude Code or Codex); an expired token is
 /// reported as such and the last good reading is shown as stale.
+///
+/// Claude's secret is read only when it is needed: when no token is held, or when the store's
+/// stamp (its modification date) changed since the token was read. An expired token in an
+/// unchanged store costs a metadata read and nothing else. After the Keychain refused
+/// `security`, the item is not read again until it changes or the owner refreshes.
 public actor UsageService {
     public typealias Clock = @Sendable () -> Date
 
@@ -125,10 +159,10 @@ public actor UsageService {
     private let cacheURL: URL?
 
     private var records: [Provider: ProviderRecord]
-    public private(set) var keychainAccess: KeychainAccess
-    /// Claude's token stays in memory (never on disk) until it expires or is refused, so the
-    /// Keychain is read once per sign-in, not once per poll.
-    private var claudeToken: ClaudeToken?
+    /// The Keychain item as it was when `security` was refused it.
+    public private(set) var claudeBlocked: CredentialStamp?
+    /// Claude's token, held in memory only (never on disk), with the stamp of the store it came from.
+    private var claude: (token: ClaudeToken, stamp: CredentialStamp)?
     private var inFlight: Set<Provider> = []
 
     public init(transport: UsageTransport, claudeSource: ClaudeTokenSource, codexSource: CodexTokenSource,
@@ -141,7 +175,7 @@ public actor UsageService {
         self.clock = clock
         let cache = cacheURL.map(UsageCache.load(from:)) ?? UsageCache()
         records = cache.providerRecords
-        keychainAccess = cache.keychainAccess
+        claudeBlocked = cache.claudeBlocked
     }
 
     public func snapshot() -> [Provider: ProviderRecord] { records }
@@ -151,10 +185,8 @@ public actor UsageService {
     /// Reads one provider unless the trigger says to wait. Returns the record afterwards.
     @discardableResult
     public func refresh(_ provider: Provider, trigger: RefreshTrigger) async -> ProviderRecord {
-        let now = clock()
         let current = record(provider)
-        guard !inFlight.contains(provider) else { return current }
-        if trigger != .user, current.shouldWait(at: now, minimumSpacing: trigger.minimumSpacing) { return current }
+        guard !inFlight.contains(provider), !current.shouldWait(at: clock(), trigger: trigger) else { return current }
         inFlight.insert(provider)
         let next: ProviderRecord
         switch provider {
@@ -169,84 +201,96 @@ public actor UsageService {
 
     // MARK: Claude
 
+    /// Every Claude failure backs off.
     private func refreshClaude(_ current: ProviderRecord, trigger: RefreshTrigger) async -> ProviderRecord {
-        let now = clock()
-        var fromMemory = true
-        if claudeToken == nil || claudeToken!.isExpired(at: now) {
-            claudeToken = nil
-            fromMemory = false
-            if let problem = await readClaudeToken(trigger: trigger) { return current.failed(problem, at: clock()) }
+        let stamp: CredentialStamp
+        switch await claudeSource.stamp() {
+        case .present(let found): stamp = found
+        case .missing:
+            claude = nil
+            return current.failed(.signedOut, at: clock())
+        case .failed(let why):
+            return current.failed(.credentials(why), at: clock())
         }
-        guard let token = claudeToken else { return current.failed(.signedOut, at: now) }
-        if token.isExpired(at: now) {
-            claudeToken = nil
-            return current.failed(.expired, at: now)
-        }
-        let response = await transport.send(ClaudeUsage.request(token: token))
-        if Self.refused(response) {
-            claudeToken = nil
-            // A token held in memory may have been replaced since: Claude Code refreshed it.
-            // Read the store once more and retry once with a different token.
-            if fromMemory, await readClaudeToken(trigger: trigger) == nil, let fresh = claudeToken, fresh != token {
-                let retry = await transport.send(ClaudeUsage.request(token: fresh))
-                if Self.refused(retry) { claudeToken = nil }
-                return outcome(of: retry, current: current) { ClaudeUsage.reading(from: $0, plan: fresh.subscriptionType, at: $1) }
+        if let problem = await holdClaudeToken(stamp: stamp, trigger: trigger) { return current.failed(problem, at: clock()) }
+        guard let held = claude else { return current.failed(.signedOut, at: clock()) }
+        if held.token.isExpired(at: clock()) { return current.failed(.expired, at: clock()) }
+
+        let response = await transport.send(ClaudeUsage.request(token: held.token))
+        if response.status == 401 {
+            // Refused. Claude Code may have replaced the token since it was read: if the store
+            // changed, read it once more and retry once with the new token. Otherwise there is
+            // nothing new to read.
+            if case .present(let now) = await claudeSource.stamp(), now != held.stamp,
+               await holdClaudeToken(stamp: now, trigger: trigger) == nil,
+               let fresh = claude, fresh.token != held.token, !fresh.token.isExpired(at: clock()) {
+                let retry = await transport.send(ClaudeUsage.request(token: fresh.token))
+                return outcome(of: retry, current: current, backOff: true) {
+                    ClaudeUsage.reading(from: $0, plan: fresh.token.subscriptionType, at: $1)
+                }
             }
-            claudeToken = nil
         }
-        return outcome(of: response, current: current) { ClaudeUsage.reading(from: $0, plan: token.subscriptionType, at: $1) }
+        return outcome(of: response, current: current, backOff: true) {
+            ClaudeUsage.reading(from: $0, plan: held.token.subscriptionType, at: $1)
+        }
     }
 
-    /// Fills `claudeToken`, or returns why it could not. The first read ever, and a read the
-    /// owner asked for, may show the Keychain prompt; a scheduled read after access was granted
-    /// never does, and after a denial only an explicit refresh asks again.
-    private func readClaudeToken(trigger: RefreshTrigger) async -> FetchProblem? {
-        let allowPrompt: Bool
-        switch keychainAccess {
-        case .unknown: allowPrompt = true
-        case .granted: allowPrompt = trigger == .user
-        case .denied:
-            guard trigger == .user else { return .keychainDenied }
-            allowPrompt = true
+    /// Makes sure `claude` holds the token of the store as `stamp` describes it, reading the
+    /// secret only when needed. Returns why it could not.
+    private func holdClaudeToken(stamp: CredentialStamp, trigger: RefreshTrigger) async -> FetchProblem? {
+        if let held = claude, held.stamp == stamp {
+            // Unchanged store. A store that keeps no modification date is read again once the
+            // held token has expired, since nothing else would tell that it changed.
+            guard stamp.modified == nil, held.token.isExpired(at: clock()) else { return nil }
         }
-        switch await claudeSource.read(allowPrompt: allowPrompt) {
+        if stamp.location == .keychain, let blocked = claudeBlocked, blocked == stamp, trigger != .user {
+            return .keychainNeedsApproval
+        }
+        switch await claudeSource.read(stamp.location, patient: trigger == .user) {
         case .found(let token):
-            keychainAccess = .granted
-            claudeToken = token
-            return token.isExpired(at: clock()) ? .expired : nil
-        case .missing: return .signedOut
-        case .denied:
-            keychainAccess = .denied
-            return .keychainDenied
-        case .needsApproval: return .keychainNeedsApproval
-        case .failed(let why): return .credentials(why)
+            claude = (token, stamp)
+            if stamp.location == .keychain { claudeBlocked = nil }
+            return nil
+        case .missing:
+            claude = nil
+            return .signedOut
+        case .needsApproval:
+            claude = nil
+            if stamp.location == .keychain { claudeBlocked = stamp }
+            return .keychainNeedsApproval
+        case .failed(let why):
+            return .credentials(why)
         }
     }
 
     // MARK: Codex
 
+    /// Codex's network failures back off; its local ones (signed out, expired) send nothing,
+    /// so they are checked again at the next poll, and the session log fills in meanwhile.
     private func refreshCodex(_ current: ProviderRecord) async -> ProviderRecord {
         let now = clock()
         let next: ProviderRecord
         switch codexSource.read() {
         case .found(let token) where token.isExpired(at: now):
-            next = current.failed(.expired, at: now)
+            next = current.failed(.expired, at: now, backOff: false)
         case .found(let token):
             let response = await transport.send(CodexUsage.request(token: token))
-            next = outcome(of: response, current: current) { CodexUsage.reading(from: $0, at: $1) }
-        case .missing, .denied, .needsApproval:
-            next = current.failed(.signedOut, at: now)
+            next = outcome(of: response, current: current, backOff: true) { CodexUsage.reading(from: $0, at: $1) }
+        case .missing, .needsApproval:
+            next = current.failed(.signedOut, at: now, backOff: false)
         case .failed(let why):
-            next = current.failed(.credentials(why), at: now)
+            next = current.failed(.credentials(why), at: now, backOff: false)
         }
         guard next.problem != nil else { return next }
-        return withSessionLogFallback(next)
+        return await withSessionLogFallback(next)
     }
 
     /// After a failed read, the newest `rate_limits` record in Codex's session logs replaces
-    /// the reading when it is newer than the one held.
-    private func withSessionLogFallback(_ record: ProviderRecord) -> ProviderRecord {
-        guard let logged = sessionLog?.latestReading() else { return record }
+    /// the reading when it is newer than the one held. The logs are read off the actor.
+    private func withSessionLogFallback(_ record: ProviderRecord) async -> ProviderRecord {
+        guard let sessionLog else { return record }
+        let logged = await Task.detached(priority: .utility) { sessionLog.latestReading() }.value
+        guard let logged else { return record }
         var next = record
         if logged.observedAt > (record.reading?.observedAt ?? .distantPast) { next.reading = logged }
         return next
@@ -254,31 +298,32 @@ public actor UsageService {
 
     // MARK: Shared
 
-    private static func refused(_ response: TransportResponse) -> Bool { response.status == 401 || response.status == 403 }
-
-    private func outcome(of response: TransportResponse, current: ProviderRecord,
+    /// 401 is a refused sign-in; 403 and every other status are the provider's error (a 403
+    /// from chatgpt.com is usually its edge, not the token).
+    private func outcome(of response: TransportResponse, current: ProviderRecord, backOff: Bool,
                          decode: (Data, Date) -> UsageReading?) -> ProviderRecord {
         let now = clock()
         guard let status = response.status else {
-            return current.failed(.network(response.failure ?? "no answer"), at: now)
+            return current.failed(.network(response.failure ?? "no answer"), at: now, backOff: backOff)
         }
+        let retryAfter = Backoff.retryAfter(response.header("Retry-After"), now: now)
         switch status {
         case 200..<300:
-            guard let reading = decode(response.body, now) else { return current.failed(.badPayload, at: now) }
+            guard let reading = decode(response.body, now) else { return current.failed(.badPayload, at: now, backOff: backOff) }
             return current.succeeded(with: reading, at: now)
-        case 401, 403:
-            return current.failed(.unauthorized, at: now)
+        case 401:
+            return current.failed(.unauthorized, at: now, backOff: backOff)
         case 429:
-            return current.failed(.rateLimited, at: now, retryAfter: Backoff.retryAfter(response.header("Retry-After"), now: now))
+            return current.failed(.rateLimited, at: now, retryAfter: retryAfter, backOff: backOff)
         default:
-            return current.failed(.server(status), at: now, retryAfter: Backoff.retryAfter(response.header("Retry-After"), now: now))
+            return current.failed(.server(status), at: now, retryAfter: retryAfter, backOff: backOff)
         }
     }
 
     private func persist() {
         guard let cacheURL else { return }
         do {
-            try UsageCache(records: records, keychainAccess: keychainAccess).save(to: cacheURL)
+            try UsageCache(records: records, claudeBlocked: claudeBlocked).save(to: cacheURL)
         } catch {
             NSLog("UsageHUD: could not save the usage cache: %@", String(describing: error))
         }

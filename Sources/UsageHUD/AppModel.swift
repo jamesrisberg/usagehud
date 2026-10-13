@@ -52,7 +52,7 @@ final class AppModel: ObservableObject {
             let cached = await service.snapshot()
             records = cached
             onChange?()
-            refresh(trigger: .opportunistic)
+            refresh(trigger: .scheduled)
         }
         reschedulePoll()
     }
@@ -93,7 +93,7 @@ final class AppModel: ObservableObject {
     }
 
     /// The panel opened: read whatever is over a minute old.
-    func panelOpened() { refresh(trigger: .opportunistic) }
+    func panelOpened() { refresh(trigger: .panelOpen) }
 
     // MARK: Settings
 
@@ -105,7 +105,7 @@ final class AppModel: ObservableObject {
         settings = next
         if pollChanged { reschedulePoll() }
         let newlyEnabled = next.enabledProviders.filter { !enabledBefore.contains($0) }
-        if !newlyEnabled.isEmpty { refresh(newlyEnabled, trigger: .opportunistic) }
+        if !newlyEnabled.isEmpty { refresh(newlyEnabled, trigger: .panelOpen) }
         onChange?()
     }
 
@@ -119,9 +119,10 @@ final class AppModel: ObservableObject {
 
     func meters(_ provider: Provider) -> [UsageWindow] { records[provider]?.reading?.meterWindows ?? [] }
 
-    /// The fullest meter across the shown providers, for MacHUD's dock badge: `42%`.
+    /// The fullest meter across the shown providers, for MacHUD's dock badge: `42%`. A window
+    /// that has reset since its reading no longer counts.
     var badge: String? {
-        let values = Provider.allCases.filter(settings.isEnabled).flatMap { meters($0) }.compactMap(\.percentUsed)
+        let values = Provider.allCases.filter(settings.isEnabled).flatMap { meters($0) }.compactMap { $0.currentPercent(at: now) }
         return values.max().map { UsageFormat.percent($0) }
     }
 
@@ -135,7 +136,7 @@ final class AppModel: ObservableObject {
             case .signedOut: return "\(name) signed out"
             case .error: return "\(name) unavailable"
             case .live, .stale:
-                let windows = meters(provider).filter { $0.kind == .session || $0.kind == .weekly }
+                let windows = meters(provider).filter { ($0.kind == .session || $0.kind == .weekly) && !$0.hasReset(at: now) }
                 let numbers = windows.map { "\(UsageFormat.percent($0.percentUsed)) \($0.label.lowercased())" }.joined(separator: ", ")
                 let stale = status(provider) == .live ? "" : " (stale)"
                 return "\(name) \(numbers.isEmpty ? "no windows" : numbers)\(stale)"
@@ -178,6 +179,7 @@ final class AppModel: ObservableObject {
     private func window(json window: UsageWindow) -> [String: Any] {
         var w: [String: Any] = ["id": window.id, "label": window.label, "kind": window.kind.rawValue]
         if let p = window.percentUsed { w["percentUsed"] = p }
+        if window.hasReset(at: now) { w["hasReset"] = true }
         if let r = window.resetsAt {
             w["resetsAt"] = iso(r)
             w["resetsInSeconds"] = Int(max(0, r.timeIntervalSince(now)))

@@ -33,8 +33,10 @@ final class BackoffTests: XCTestCase {
         XCTAssertEqual(again.backoffLevel, 2)
         XCTAssertEqual(again.retryAt, Fixtures.now.addingTimeInterval(45))
         let expired = again.failed(.expired, at: Fixtures.now)
-        XCTAssertEqual(expired.backoffLevel, 0, "a local problem sent nothing, so it does not back off")
-        XCTAssertNil(expired.retryAt)
+        XCTAssertEqual(expired.backoffLevel, 3, "every failure backs off unless the caller says not to")
+        let local = again.failed(.signedOut, at: Fixtures.now, backOff: false)
+        XCTAssertEqual(local.backoffLevel, 0)
+        XCTAssertNil(local.retryAt)
         let recovered = again.succeeded(with: reading, at: Fixtures.now)
         XCTAssertEqual(recovered.backoffLevel, 0)
         XCTAssertNil(recovered.retryAt)
@@ -42,13 +44,23 @@ final class BackoffTests: XCTestCase {
     }
 
     func testShouldWait() {
-        let backingOff = ProviderRecord(lastAttemptAt: Fixtures.now.addingTimeInterval(-300), retryAt: Fixtures.now.addingTimeInterval(60))
-        XCTAssertTrue(backingOff.shouldWait(at: Fixtures.now, minimumSpacing: 0))
-        XCTAssertFalse(backingOff.shouldWait(at: Fixtures.now.addingTimeInterval(61), minimumSpacing: 30))
+        let limited = ProviderRecord(lastAttemptAt: Fixtures.now.addingTimeInterval(-300), problem: .rateLimited,
+                                     retryAt: Fixtures.now.addingTimeInterval(60))
+        XCTAssertTrue(limited.shouldWait(at: Fixtures.now, trigger: .scheduled))
+        XCTAssertTrue(limited.shouldWait(at: Fixtures.now, trigger: .panelOpen), "a remote problem's backoff holds for the panel")
+        XCTAssertFalse(limited.shouldWait(at: Fixtures.now, trigger: .user))
+        XCTAssertFalse(limited.shouldWait(at: Fixtures.now.addingTimeInterval(61), trigger: .scheduled))
+
+        let expired = ProviderRecord(lastAttemptAt: Fixtures.now.addingTimeInterval(-300), problem: .expired,
+                                     retryAt: Fixtures.now.addingTimeInterval(600))
+        XCTAssertTrue(expired.shouldWait(at: Fixtures.now, trigger: .scheduled))
+        XCTAssertFalse(expired.shouldWait(at: Fixtures.now, trigger: .panelOpen), "a local problem is checked again at once")
+
         let recent = ProviderRecord(lastAttemptAt: Fixtures.now.addingTimeInterval(-20))
-        XCTAssertTrue(recent.shouldWait(at: Fixtures.now, minimumSpacing: 30))
-        XCTAssertFalse(recent.shouldWait(at: Fixtures.now, minimumSpacing: 10))
-        XCTAssertFalse(ProviderRecord().shouldWait(at: Fixtures.now, minimumSpacing: 60))
+        XCTAssertTrue(recent.shouldWait(at: Fixtures.now, trigger: .scheduled), "under 30 s")
+        XCTAssertTrue(ProviderRecord(lastAttemptAt: Fixtures.now.addingTimeInterval(-45)).shouldWait(at: Fixtures.now, trigger: .panelOpen))
+        XCTAssertFalse(ProviderRecord(lastAttemptAt: Fixtures.now.addingTimeInterval(-45)).shouldWait(at: Fixtures.now, trigger: .scheduled))
+        XCTAssertFalse(ProviderRecord().shouldWait(at: Fixtures.now, trigger: .panelOpen))
     }
 }
 
@@ -71,7 +83,8 @@ final class StatusTests: XCTestCase {
         XCTAssertEqual(status(nil, enabled: false), .off)
         XCTAssertEqual(status(nil), .loading)
         XCTAssertEqual(status(ProviderRecord(problem: .expired)), .signedOut)
-        XCTAssertEqual(status(ProviderRecord(problem: .keychainDenied)), .signedOut)
+        XCTAssertEqual(status(ProviderRecord(problem: .keychainNeedsApproval)), .signedOut)
+        XCTAssertEqual(status(ProviderRecord(problem: .server(403))), .error)
         XCTAssertEqual(status(ProviderRecord(problem: .rateLimited)), .error)
         XCTAssertEqual(status(ProviderRecord(reading: reading(age: 30))), .live)
         XCTAssertEqual(status(ProviderRecord(reading: reading(age: 700))), .stale(age: 700), "older than the limit")
@@ -95,7 +108,7 @@ final class FormatTests: XCTestCase {
         XCTAssertEqual(UsageFormat.duration(3600), "1h")
         XCTAssertEqual(UsageFormat.duration(86400 * 3 + 3600 * 4 + 60 * 5), "3d 4h")
         XCTAssertEqual(UsageFormat.resets(Fixtures.now.addingTimeInterval(7980), now: Fixtures.now), "resets in 2h 13m")
-        XCTAssertEqual(UsageFormat.resets(Fixtures.now.addingTimeInterval(-5), now: Fixtures.now), "resetting")
+        XCTAssertEqual(UsageFormat.resets(Fixtures.now.addingTimeInterval(-5), now: Fixtures.now), "reset, waiting for a new reading")
         XCTAssertNil(UsageFormat.resets(nil, now: Fixtures.now))
         XCTAssertEqual(UsageFormat.age(20), "just now")
         XCTAssertEqual(UsageFormat.age(3 * 3600 + 120), "3h 2m ago")

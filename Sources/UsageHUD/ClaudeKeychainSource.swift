@@ -1,17 +1,19 @@
 import Foundation
-import LocalAuthentication
 import Security
 import UsageHUDKit
 
-/// Reads Claude Code's OAuth credentials the way Claude Code stores them on macOS: the
-/// plaintext `<config>/.credentials.json` when it exists, else the login Keychain's generic
-/// password `Claude Code-credentials` (account: the login name). Read-only: this type only ever
-/// calls `SecItemCopyMatching`.
+/// Claude Code's credentials store on macOS, read the way Claude Code keeps it:
 ///
-/// The first read shows the Keychain's prompt ("UsageHUD wants to use your confidential
-/// information"); "Always Allow" lets later reads through silently. A read with `allowPrompt`
-/// false asks the Keychain to fail rather than prompt (`errSecInteractionNotAllowed`), which
-/// UsageHUD reports as "Refresh to read Claude Code's sign-in".
+/// 1. the plaintext `<config>/.credentials.json`, when it exists and holds a token;
+/// 2. else the login Keychain's generic password `Claude Code-credentials` (account: the login
+///    name), whose secret is read with `/usr/bin/security find-generic-password -s <service>
+///    -a <account> -w` (`KeychainSecretCommand`). Claude Code writes the item with `security`,
+///    so the item's access list already trusts that tool: no prompt, and nothing depends on
+///    UsageHUD's own signature.
+///
+/// `stamp()` reads only the item's attributes (`SecItemCopyMatching` with
+/// `kSecReturnAttributes`, never its data), which the Keychain gives without asking; its
+/// modification date tells the service when the secret is worth reading again.
 struct ClaudeKeychainSource: ClaudeTokenSource {
     let service: String
     let account: String
@@ -23,52 +25,63 @@ struct ClaudeKeychainSource: ClaudeTokenSource {
         plaintextFile = ClaudeCredentialsStore.plaintextFile(environment: environment)
     }
 
-    /// Keychain reads wait for the owner while the prompt is up, so they run on their own queue.
-    private static let queue = DispatchQueue(label: "xyz.machud.usagehud.keychain")
+    /// How long a scheduled read waits for `security`; the owner's refresh waits longer.
+    static let timeout: TimeInterval = 10
+    static let patientTimeout: TimeInterval = 60
 
-    func read(allowPrompt: Bool) async -> CredentialLookup<ClaudeToken> {
-        if let data = try? Data(contentsOf: plaintextFile), let token = ClaudeToken.parse(data) { return .found(token) }
+    func stamp() async -> StampLookup {
+        if let modified = usableFileDate() { return .present(CredentialStamp(location: .file, modified: modified)) }
         return await withCheckedContinuation { continuation in
-            Self.queue.async { continuation.resume(returning: readKeychain(allowPrompt: allowPrompt)) }
+            DispatchQueue.global(qos: .utility).async { continuation.resume(returning: keychainStamp()) }
         }
     }
 
-    private func readKeychain(allowPrompt: Bool) -> CredentialLookup<ClaudeToken> {
-        var lookup = copy(account: account, allowPrompt: allowPrompt)
-        // An item saved under another account name (a renamed user) still belongs to this service.
-        if case .missing = lookup { lookup = copy(account: nil, allowPrompt: allowPrompt) }
-        return lookup
+    func read(_ location: CredentialStamp.Location, patient: Bool) async -> CredentialLookup<ClaudeToken> {
+        switch location {
+        case .file:
+            guard var data = try? Data(contentsOf: plaintextFile) else { return .missing }
+            defer { data.resetBytes(in: 0..<data.count) }
+            return ClaudeToken.parse(data).map { .found($0) } ?? .missing
+        case .keychain:
+            let invocation = KeychainSecretCommand.Invocation.findClaudeCredentials(service: service, account: account)
+            let timeout = patient ? Self.patientTimeout : Self.timeout
+            return await withCheckedContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    continuation.resume(returning: KeychainSecretCommand.read(invocation, timeout: timeout))
+                }
+            }
+        }
     }
 
-    private func copy(account: String?, allowPrompt: Bool) -> CredentialLookup<ClaudeToken> {
-        var query: [String: Any] = [
+    /// The plaintext file's modification date, when it exists and holds a token.
+    private func usableFileDate() -> Date? {
+        guard var data = try? Data(contentsOf: plaintextFile) else { return nil }
+        defer { data.resetBytes(in: 0..<data.count) }
+        guard ClaudeToken.parse(data) != nil else { return nil }
+        return (try? plaintextFile.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+    }
+
+    /// The Keychain item's attributes only: whether it exists and when it last changed.
+    private func keychainStamp() -> StampLookup {
+        let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecReturnData as String: true,
+            kSecAttrAccount as String: account,
+            kSecReturnAttributes as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
-        if let account { query[kSecAttrAccount as String] = account }
-        if !allowPrompt {
-            let context = LAContext()
-            context.interactionNotAllowed = true
-            query[kSecUseAuthenticationContext as String] = context
-        }
         var result: CFTypeRef?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
         switch status {
         case errSecSuccess:
-            guard let data = result as? Data, let token = ClaudeToken.parse(data) else {
-                return .failed("Claude Code's sign-in is in a format UsageHUD can't read")
-            }
-            return .found(token)
+            let attributes = result as? [String: Any]
+            let modified = attributes?[kSecAttrModificationDate as String] as? Date
+                ?? attributes?[kSecAttrCreationDate as String] as? Date
+            return .present(CredentialStamp(location: .keychain, modified: modified))
         case errSecItemNotFound:
             return .missing
-        case errSecUserCanceled, errSecAuthFailed:
-            return .denied
-        case errSecInteractionNotAllowed:
-            return allowPrompt ? .failed("The Keychain is locked") : .needsApproval
         default:
-            return .failed("Keychain error \(status)")
+            return .failed("The Keychain could not be searched (\(status))")
         }
     }
 }

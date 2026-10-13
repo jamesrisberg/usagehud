@@ -151,16 +151,70 @@ final class SessionLogTests: XCTestCase {
         XCTAssertNil(CodexSessionLog(sessionsDirectory: root.appendingPathComponent("missing")).latestReading())
     }
 
-    func testATailWithoutARecordFallsBackToTheWholeFile() throws {
+    func testAChunkedBackwardScanFindsARecordFarFromTheEndAndAcrossChunks() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("usagehud-tail-\(UUID().uuidString)")
         defer { try? FileManager.default.removeItem(at: dir) }
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let filler = String(repeating: #"{"type":"response_item","payload":{"text":"xxxxxxxxxxxxxxxx"}}"# + "\n", count: 200)
         let url = dir.appendingPathComponent("rollout.jsonl")
         try Data((Fixtures.sessionRecord(timestamp: "2026-10-13T15:00:00Z", usedPercent: 33) + "\n" + filler).utf8).write(to: url)
+        for chunk in [64, 100, 1024, 1 << 20] {
+            var log = CodexSessionLog(sessionsDirectory: dir)
+            log.chunkBytes = chunk
+            XCTAssertEqual(log.latestReading(in: url)?.windows.first?.percentUsed, 33, "chunks of \(chunk) bytes")
+        }
+        // The newest of several records wins, whatever the chunk boundaries.
+        try Data((Fixtures.sessionRecord(timestamp: "2026-10-13T15:00:00Z", usedPercent: 33) + "\n" + filler
+                  + Fixtures.sessionRecord(timestamp: "2026-10-13T15:30:00Z", usedPercent: 44) + "\n" + filler).utf8).write(to: url)
         var log = CodexSessionLog(sessionsDirectory: dir)
-        log.tailBytes = 1024
-        XCTAssertEqual(log.latestReading(in: url)?.windows.first?.percentUsed, 33)
+        log.chunkBytes = 300
+        XCTAssertEqual(log.latestReading(in: url)?.windows.first?.percentUsed, 44)
+    }
+
+    func testAnUnchangedFileIsNotReadTwice() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("usagehud-memo-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let url = dir.appendingPathComponent("rollout.jsonl")
+        try Data((Fixtures.sessionRecord(timestamp: "2026-10-13T15:00:00Z", usedPercent: 33) + "\n").utf8).write(to: url)
+        let log = CodexSessionLog(sessionsDirectory: dir)
+        XCTAssertEqual(log.latestReading()?.windows.first?.percentUsed, 33)
+        XCTAssertEqual(log.latestReading()?.windows.first?.percentUsed, 33)
+        XCTAssertEqual(log.memo.scanCount, 1, "the second look is remembered")
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data((Fixtures.sessionRecord(timestamp: "2026-10-13T15:10:00Z", usedPercent: 35) + "\n").utf8))
+        try handle.close()
+        XCTAssertEqual(log.latestReading()?.windows.first?.percentUsed, 35, "a file that grew is read again")
+        XCTAssertEqual(log.memo.scanCount, 2)
+    }
+
+    func testFilesArePickedByModificationDateNotByFolder() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("usagehud-mtime-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        func write(_ path: String, _ line: String, modified: Date) throws {
+            let url = root.appendingPathComponent(path)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data((line + "\n").utf8).write(to: url)
+            try FileManager.default.setAttributes([.modificationDate: modified], ofItemAtPath: url.path)
+        }
+        // A long session started on the 9th and still being written, and newer folders with older sessions.
+        try write("2026/10/09/rollout-long.jsonl", Fixtures.sessionRecord(timestamp: "2026-10-13T15:55:00Z", usedPercent: 61),
+                  modified: Fixtures.now.addingTimeInterval(-300))
+        for day in 10...13 {
+            try write("2026/10/\(day)/rollout-\(day).jsonl", Fixtures.sessionRecord(timestamp: "2026-10-\(day)T08:00:00Z", usedPercent: Double(day)),
+                      modified: Fixtures.now.addingTimeInterval(-Double(14 - day) * 86400))
+        }
+        var log = CodexSessionLog(sessionsDirectory: root)
+        log.fileLimit = 2
+        XCTAssertEqual(log.newestFiles().map(\.lastPathComponent), ["rollout-long.jsonl", "rollout-13.jsonl"])
+        XCTAssertEqual(log.latestReading()?.windows.first?.percentUsed, 61)
+    }
+
+    func testOlderLogsResetInSecondsFromTheRecord() throws {
+        let record = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(#"{"timestamp": "2026-10-13T15:00:00Z", "payload": {"rate_limits": {"primary": {"used_percent": 12, "window_minutes": 300, "resets_in_seconds": 1800}}}}"#.utf8)) as? [String: Any])
+        let reading = try XCTUnwrap(CodexSessionLog.reading(fromRecord: record))
+        XCTAssertEqual(reading.windows.first?.resetsAt, PayloadValues.iso8601("2026-10-13T15:30:00Z"))
     }
 }
 
@@ -189,6 +243,18 @@ final class PayloadValueTests: XCTestCase {
 }
 
 final class MeterWindowTests: XCTestCase {
+    func testAWindowPastItsResetNoLongerHoldsItsNumber() {
+        let window = UsageWindow(id: "five_hour", label: "Session", kind: .session, percentUsed: 80,
+                                 resetsAt: Fixtures.now.addingTimeInterval(-1), windowSeconds: 18000)
+        XCTAssertTrue(window.hasReset(at: Fixtures.now))
+        XCTAssertNil(window.currentPercent(at: Fixtures.now))
+        XCTAssertEqual(window.currentPercent(at: Fixtures.now.addingTimeInterval(-60)), 80)
+        XCTAssertEqual(UsageFormat.resets(window.resetsAt, now: Fixtures.now), "reset, waiting for a new reading")
+        var noReset = window
+        noReset.resetsAt = nil
+        XCTAssertEqual(noReset.currentPercent(at: Fixtures.now), 80)
+    }
+
     func testUnusedExtrasAndOtherModelsHaveNoMeter() throws {
         let reading = try XCTUnwrap(ClaudeUsage.reading(from: Data(Fixtures.claudeUsage.utf8), plan: nil, at: Fixtures.now))
         XCTAssertEqual(reading.meterWindows.map(\.id), ["five_hour", "seven_day", "seven_day_model"],

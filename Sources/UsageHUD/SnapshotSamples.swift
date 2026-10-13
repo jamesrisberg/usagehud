@@ -8,7 +8,7 @@ import UsageHUDKit
 enum SnapshotSamples {
     /// The states `--snapshot-state` pictures.
     enum State: String, CaseIterable {
-        case live, stale, loading, signedout, error, denied, off
+        case live, stale, loading, signedout, error, needsyou, off
     }
 
     static func records(_ state: State, now: Date) -> [Provider: ProviderRecord] {
@@ -20,11 +20,15 @@ enum SnapshotSamples {
             return [.claude: ProviderRecord(reading: claudeLive, lastAttemptAt: attempt, lastSuccessAt: attempt),
                     .codex: ProviderRecord(reading: codexLive, lastAttemptAt: attempt, lastSuccessAt: attempt)]
         case .stale:
-            // Claude's token expired 2 h ago; Codex is offline and shows its session log.
+            // Claude's token expired 2 h ago, and its session window has reset since; Codex is
+            // offline and shows its session log.
             let old = now.addingTimeInterval(-2 * 3600 - 300)
+            var claudeOld = claudeReading(at: old, now: now)
+            claudeOld.windows[0].resetsAt = now.addingTimeInterval(-10 * 60)
             var logged = codexReading(at: now.addingTimeInterval(-25 * 60), now: now)
             logged.source = .sessionLog
-            return [.claude: ProviderRecord(reading: claudeReading(at: old, now: now), lastAttemptAt: attempt, lastSuccessAt: old, problem: .expired),
+            return [.claude: ProviderRecord(reading: claudeOld, lastAttemptAt: attempt, lastSuccessAt: old, problem: .expired,
+                                            backoffLevel: 3, retryAt: now.addingTimeInterval(600)),
                     .codex: ProviderRecord(reading: logged, lastAttemptAt: attempt, lastSuccessAt: old, problem: .network("offline"),
                                            backoffLevel: 2, retryAt: now.addingTimeInterval(200))]
         case .loading:
@@ -35,8 +39,9 @@ enum SnapshotSamples {
         case .error:
             return [.claude: ProviderRecord(lastAttemptAt: attempt, problem: .rateLimited, backoffLevel: 1, retryAt: now.addingTimeInterval(230)),
                     .codex: ProviderRecord(lastAttemptAt: attempt, problem: .server(503), backoffLevel: 1, retryAt: now.addingTimeInterval(100))]
-        case .denied:
-            return [.claude: ProviderRecord(lastAttemptAt: attempt, problem: .keychainDenied),
+        case .needsyou:
+            return [.claude: ProviderRecord(lastAttemptAt: attempt, problem: .keychainNeedsApproval, backoffLevel: 1,
+                                            retryAt: now.addingTimeInterval(80)),
                     .codex: ProviderRecord(reading: codexLive, lastAttemptAt: attempt, lastSuccessAt: attempt)]
         }
     }

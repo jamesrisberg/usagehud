@@ -34,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
 
-        // `--snapshot <path.png> [--snapshot-state live|stale|loading|signedout|error|denied|off]`:
+        // `--snapshot <path.png> [--snapshot-state live|stale|loading|signedout|error|needsyou|off]`:
         // the panel over sample readings, written once it settles; then quit. A snapshot only
         // draws: no control socket (a running app owns that name, and starting it announces the
         // app to MacHUD), no hotkey, no menu bar item, and no credential read or request.
