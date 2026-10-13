@@ -6,6 +6,8 @@ All notable changes to UsageHUD are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-13
+
 ### Added
 - See how much of your Claude and Codex subscriptions you have used: a meter per window
   (Claude's session, weekly and top-model weekly; Codex's windows and credits), each with when
