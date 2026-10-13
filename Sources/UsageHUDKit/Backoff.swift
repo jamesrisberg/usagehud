@@ -1,7 +1,8 @@
 import Foundation
 
 /// How long a provider stays quiet after a failed read. Anthropic's usage endpoint answers 429
-/// quota meter's pacing) and a `Retry-After` header wins when the provider sends one.
+/// in practice, so failures back off exponentially (2 min doubling to 30 min) and a
+/// `Retry-After` header wins when the provider sends one.
 public enum Backoff {
     public static let base: TimeInterval = 120
     public static let maximum: TimeInterval = 30 * 60

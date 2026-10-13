@@ -2,6 +2,7 @@ import Foundation
 
 /// Codex's subscription usage: `GET https://chatgpt.com/backend-api/wham/usage` with the
 /// ChatGPT access token from `~/.codex/auth.json`. The endpoint rejects unknown user agents,
+/// so the request sends, header for header, what a client the endpoint accepts sends.
 public enum CodexUsage {
     public static let url = URL(string: "https://chatgpt.com/backend-api/wham/usage")!
     /// The user agent the reference sends; the endpoint answers it.

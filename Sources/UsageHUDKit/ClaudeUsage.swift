@@ -3,7 +3,7 @@ import Foundation
 
 /// Claude's subscription usage: `GET https://api.anthropic.com/api/oauth/usage` with Claude
 /// Code's OAuth access token. The request, the credential format and the payload handling
-/// management web UI.
+/// mirror CLIProxyAPI's management web UI.
 public enum ClaudeUsage {
     public static let url = URL(string: "https://api.anthropic.com/api/oauth/usage")!
 

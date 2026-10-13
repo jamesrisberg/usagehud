@@ -1,8 +1,9 @@
 import Foundation
 @testable import UsageHUDKit
 
-/// times; Codex's `wham/usage` answer and session log record are real reads (2026-10-13) with
-/// every identifier (user, account, email) removed.
+/// Payloads in the providers' shapes, numbers only. Claude's carries Anthropic's six-digit
+/// fractional reset times; Codex's `wham/usage` answer and session log record are real reads
+/// (2026-10-13) with every identifier (user, account, email) removed.
 enum Fixtures {
     /// 2026-10-13T16:00:00Z
     static let now = Date(timeIntervalSince1970: 1_791_907_200)
