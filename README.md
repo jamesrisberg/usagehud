@@ -34,10 +34,12 @@ the `usagehud` command onto your PATH and launches it.
 
 There is nothing to allow: UsageHUD reads Claude Code's Keychain item through
 `/usr/bin/security`, the tool Claude Code wrote it with, so the item already trusts it and no
-prompt appears (and rebuilding or re-signing UsageHUD changes nothing). If the Keychain ever
-refuses, Claude shows "Needs you" and is not tried again until Claude Code updates its sign-in or
-you press Refresh; that refresh is the one time the Keychain may ask, and for this item it can
-ask for your login password.
+prompt appears (and rebuilding or re-signing UsageHUD changes nothing). That read runs at launch,
+after Claude Code updates its sign-in, and on Refresh, from the background as well as from you.
+If the item ever stopped trusting `security`, the Keychain's prompt could show during one of
+those background reads for up to 10 seconds, at most once per change of the item (for this item
+it can ask for your login password). After that, or any refusal, Claude shows "Needs you" and is
+not read again until Claude Code updates its sign-in or you press Refresh.
 
 ## Use
 
@@ -73,7 +75,8 @@ Where the numbers come from:
   "Claude Code-credentials" -a <login name> -w` (run with `CLAUDE_CONFIG_DIR` set, UsageHUD
   reads that directory's file and item, as Claude Code names them). Before reading the secret,
   UsageHUD reads only the item's modification date; the secret is read again only when that
-  changes, so an expired, unchanged sign-in costs nothing. The token is held in memory, sent
+  changes, or once when the held token expires or is refused (the date has one-second
+  resolution), so an expired, unchanged sign-in costs nothing after that one read. The token is held in memory, sent
   only to api.anthropic.com, and never written anywhere.
 - **Codex**: `GET https://chatgpt.com/backend-api/wham/usage` with the access token and account id
   from `~/.codex/auth.json` (`CODEX_HOME` if set). Offline, signed out or expired: the newest

@@ -77,21 +77,28 @@ UsageHUD sends exactly two requests, both `GET` without a body:
 - How Claude's token is read. `stamp` first, which reads no secret: the plaintext file's
   modification date when the file holds a token, else the Keychain item's attributes only
   (`SecItemCopyMatching` with `kSecReturnAttributes`, never `kSecReturnData`), for
-  `kSecAttrModificationDate`. The secret is read only when no token is held or that stamp
-  changed: from the file, or by running `/usr/bin/security find-generic-password -s
+  `kSecAttrModificationDate`. The secret is read only when no token is held, when that stamp
+  changed, or once per held token after it expires or gets a 401 with the stamp unchanged (the
+  date has one-second resolution, so two rewrites inside a second can leave it unchanged): from
+  the file, or by running `/usr/bin/security find-generic-password -s
   "Claude Code-credentials" -a <login name> -w` (fixed path, an argument array, no shell, stdin
   closed, stderr discarded, stdout kept in memory and zeroed after parsing; 10 s timeout, 60 s
   for the owner's refresh). Claude Code writes its item with `security`, so the item's access
   list already trusts that tool: the read shows no prompt and does not depend on UsageHUD's own
-  signature. An expired token in an unchanged store costs a metadata read and nothing else.
-- A 401 rereads the store only if its stamp changed since the token was read, then retries once
-  with the new token; a 403 is the provider's error (`server`), and never touches the store.
-- If `security` is refused (exit 36 interaction not allowed, 51 authorization failed, 128
-  canceled) or does not answer in time, Claude reads as `keychainNeedsApproval` ("needs you")
-  and the item is not read again until it changes or the owner refreshes (the button, the menu,
-  `usagehud refresh`). That refusal survives a relaunch. If the item's access list no longer
-  trusts `security`, the owner's refresh is what may bring up the Keychain's own prompt, which
-  for a `security`-created item can ask for the login password.
+  signature. Past that one fresh read, an expired token in an unchanged store costs a metadata
+  read and nothing else.
+- A 401 rereads the store (if its stamp changed, or as the token's one fresh read) and retries
+  once with a different token; a 403 is the provider's error (`server`), and never touches the
+  store.
+- Scheduled reads run `security` too: the first read after launch, and the first read after
+  the item changes, come from a poll as often as from the owner (10 s limit). If the item ever
+  stops trusting `security`, the Keychain's prompt can appear in the background during such a
+  read, for at most those 10 s, at most once per change of the item. That read (and any read
+  `security` is refused: exit 36 interaction not allowed, 51 authorization failed, 128
+  canceled, or no answer in time) leaves Claude as `keychainNeedsApproval` ("needs you"), and
+  the item is not read again until it changes or the owner refreshes (the button, the menu,
+  `usagehud refresh`; 60 s limit). The refusal survives a relaunch. For a `security`-created
+  item the prompt can ask for the login password.
 - Codex offline fallback: after any failed Codex read, the newest record with a non-null
   `rate_limits` (`primary`/`secondary` `{used_percent, window_minutes, resets_at}`, or the older
   `resets_in_seconds` from the record's timestamp, `credits`, `plan_type`) in the six most
