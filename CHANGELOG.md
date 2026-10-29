@@ -6,6 +6,13 @@ All notable changes to UsageHUD are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-10-29
+
+### Fixed
+- Rebuilt with HUDKit 0.5.1 so animated hover shows retry desktop recovery when macOS
+  still considers the panel open on another desktop or a hide is in progress. Hovering
+  keeps focus in the app you are using.
+
 ## [0.1.1] - 2026-10-13
 
 ### Changed
