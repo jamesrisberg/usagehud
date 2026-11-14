@@ -6,6 +6,10 @@ All notable changes to UsageHUD are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+- The hover panel follows MacHUD's placement and stays clear of both arms of a corner toolbar.
+- Reopening the panel during a hide keeps its latest position.
+
 ## [0.1.2] - 2026-10-29
 
 ### Fixed
