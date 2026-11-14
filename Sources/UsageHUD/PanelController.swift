@@ -40,7 +40,7 @@ final class PanelController {
             let frame = assignedFrame ?? transition.panelFrame(size: window.frame.size) ?? window.frame
             HUDAnimation.slide(in: window, from: from, to: frame)
         } else {
-            HUDAnimation.fadeIn(window)
+            HUDAnimation.fadeIn(window, to: assignedFrame)
         }
         onStateChange?()
     }

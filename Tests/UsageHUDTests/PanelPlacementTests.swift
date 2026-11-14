@@ -21,4 +21,19 @@ final class PanelPlacementTests: XCTestCase {
         XCTAssertEqual(panel.window.frame, assigned)
         XCTAssertFalse(panel.window.frame.intersects(toolbar))
     }
+
+    func testPlainShowDuringConcealmentKeepsTheLatestAssignedFrame() async throws {
+        let panel = PanelController(model: AppModel(settingsURL: nil))
+        defer { panel.hide(); panel.window.orderOut(nil) }
+        panel.setFrame(CGRect(origin: CGPoint(x: 200, y: 200), size: PanelController.size))
+        panel.show()
+        try await Task.sleep(nanoseconds: 350_000_000)
+        panel.hide(HUDPanelTransition(to: .left))
+        let latest = CGRect(origin: CGPoint(x: 360, y: 140), size: PanelController.size)
+        panel.setFrame(latest)
+        panel.show()
+        try await Task.sleep(nanoseconds: 350_000_000)
+        XCTAssertTrue(panel.isShown)
+        XCTAssertEqual(panel.window.frame, latest)
+    }
 }
