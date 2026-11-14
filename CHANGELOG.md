@@ -10,6 +10,13 @@ All notable changes to UsageHUD are documented here. The format follows
 - The hover panel follows MacHUD's placement and stays clear of both arms of a corner toolbar.
 - Reopening the panel during a hide keeps its latest position.
 
+## [0.1.3] - 2026-11-14
+
+### Fixed
+- Panels recover onto the current desktop when macOS leaves them on another desktop,
+  while keeping keyboard focus in the app you are using.
+
+
 ## [0.1.2] - 2026-10-29
 
 ### Fixed
