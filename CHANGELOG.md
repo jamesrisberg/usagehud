@@ -6,6 +6,12 @@ All notable changes to UsageHUD are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-11-14
+
+### Fixed
+- Panels recover onto the current desktop when macOS leaves them on another desktop,
+  while keeping keyboard focus in the app you are using.
+
 ## [0.1.2] - 2026-10-29
 
 ### Fixed
